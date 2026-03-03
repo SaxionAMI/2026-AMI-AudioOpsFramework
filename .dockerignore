@@ -1,0 +1,81 @@
+# Git
+.git
+.gitignore
+.gitattributes
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+dist/
+build/
+*.egg
+.Python
+venv/
+env/
+.venv
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Development
+.env
+.env.local
+*.log
+.ipynb_checkpoints/
+
+# Audio Ops Framework
+mlruns/
+mlflow/
+data/
+outputs/
+logs/
+models/
+checkpoints/
+.cache/
+tmp/
+temp/
+
+# Audio files (large)
+*.wav
+*.mp3
+*.flac
+*.ogg
+
+# Model files
+*.pb
+*.pth
+*.ckpt
+
+# Docker
+Dockerfile
+docker-compose.yml
+docker-compose.*.yml
+
+# CI/CD
+.github/
+.gitlab-ci.yml
+
+# Documentation
+docs/_build/
+
+# Node (if any frontend)
+node_modules/
+npm-debug.log
+
+# OS
+.DS_Store
+Thumbs.db
