@@ -1,0 +1,3 @@
+# tasks/speech_to_text/config.yaml
+feature_type: mfcc
+model_architecture: transformer

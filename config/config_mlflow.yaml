@@ -1,0 +1,144 @@
+# MLFlow Configuration
+# Experiment tracking and model registry setup
+
+mlflow:
+  # Server configuration
+  host: 0.0.0.0
+  port: 5000
+  workers: 4
+  
+  # Backend storage configuration
+  backend_store_uri: sqlite:////mlflow/mlflow.db
+  default_artifact_root: /mlflow/artifacts
+  
+  # Tracking URI
+  tracking_uri: http://mlflow:5000
+  
+  # Database configuration (when using alternative backends)
+  database:
+    type: sqlite  # Options: sqlite, postgresql, mysql, mssql
+    # For PostgreSQL:
+    # uri: postgresql://user:password@postgres:5432/mlflow_db
+    # For MySQL:
+    # uri: mysql://user:password@mysql:3306/mlflow_db
+
+# Experiment configuration
+experiments:
+  - name: audio_sentiment_analysis
+    description: "Audio sentiment and emotion detection models"
+    tags:
+      - modality: sentiment
+      - domain: audio
+  
+  - name: speech_quality_assessment
+    description: "Speech quality and clarity evaluation"
+    tags:
+      - modality: quality
+      - domain: audio
+  
+  - name: non_verbal_components_detection
+    description: "Detection of coughs, breaths, hiccups in audio"
+    tags:
+      - modality: classification
+      - domain: audio
+  
+  - name: tts_synthesis
+    description: "Text-to-speech synthesis models"
+    tags:
+      - modality: generation
+      - domain: audio
+  
+  - name: custom_audio_models
+    description: "Custom audio processing and analysis models"
+    tags:
+      - modality: custom
+      - domain: audio
+
+# Model registry configuration
+model_registry:
+  enable_creation: true
+  default_stage_transitions:
+    - from: None
+      to: Staging
+      description: "Model promoted to staging for evaluation"
+    
+    - from: Staging
+      to: Production
+      description: "Model promoted to production"
+    
+    - from: Production
+      to: Archived
+      description: "Model archived or superseded"
+
+# Artifact storage configuration
+artifacts:
+  root_path: /mlflow/artifacts
+  max_artifact_size_mb: 1000
+  
+  # Alternative artifact backends
+  backends:
+    s3:
+      enabled: false
+      bucket: mlflow-artifacts
+      key_prefix: artifacts
+    
+    gcs:
+      enabled: false
+      bucket: mlflow-artifacts
+      key_prefix: artifacts
+    
+    azure:
+      enabled: false
+      container: mlflow-artifacts
+      account: null
+      account_key: null
+
+# Logging and monitoring
+logging:
+  level: INFO
+  log_file: /mlflow/logs/mlflow.log
+  max_log_size_mb: 100
+  backup_count: 5
+
+# Performance and resource settings
+performance:
+  max_request_size: 100  # MB
+  request_timeout: 300   # seconds
+  cache_artifact_metadata: true
+  artifact_upload_download_timeout: 3600  # seconds
+
+# Security and access control
+security:
+  enable_auth: false  # Set to true in production
+  default_permissions:
+    - role: admin
+      permissions:
+        - create_experiment
+        - edit_experiment
+        - delete_experiment
+        - create_model
+        - edit_model
+        - register_model
+        - promote_model
+    
+    - role: developer
+      permissions:
+        - create_experiment
+        - edit_experiment
+        - register_model
+    
+    - role: viewer
+      permissions:
+        - view_experiment
+        - view_model
+        - compare_experiments
+
+# Cleanup and retention policies
+cleanup:
+  auto_cleanup: true
+  archive_old_experiments:
+    enabled: true
+    days_old: 180
+  delete_old_artifacts:
+    enabled: false  # Set to true with caution
+    days_old: 365

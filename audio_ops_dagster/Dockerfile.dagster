@@ -1,0 +1,32 @@
+FROM python:3.10-slim
+
+WORKDIR /app
+
+# Install system deps + the libraries PyTorch needs to not crash on start
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    curl \
+    libsndfile1 \
+    libgomp1 \
+    libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Poetry
+RUN curl -sSL https://install.python-poetry.org | python3 -
+ENV PATH="/root/.local/bin:$PATH"
+RUN poetry config virtualenvs.create false
+
+# Set PYTHONPATH
+ENV PYTHONPATH="/app"
+
+# Copy and install dependencies
+COPY audio_ops_dagster/dagster_pyproject.toml ./pyproject.toml
+RUN poetry install --no-interaction --no-ansi
+
+# Copy code
+COPY audio_ops_dagster ./audio_ops_dagster
+COPY config ./config
+
+RUN mkdir -p /app/dagster_home /app/storage /app/models
+
+CMD ["dagster-webserver", "-h", "0.0.0.0", "-p", "3000", "-m", "audio_ops_dagster.definitions"]

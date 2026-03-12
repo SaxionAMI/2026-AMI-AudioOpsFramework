@@ -3,6 +3,46 @@
 .gitignore
 .gitattributes
 
+# Environment & Secrets
+.env
+.env.*
+.secrets.env
+.secrets.env.*
+secrets/
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+pip-log.txt
+pip-delete-this-directory.txt
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
 # IDE
 .vscode/
 .idea/
@@ -11,71 +51,31 @@
 *~
 .DS_Store
 
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.egg-info/
-.eggs/
-dist/
-build/
-*.egg
-.Python
-venv/
-env/
-.venv
+# Documentation
+docs/_build/
+site/
 
-# Testing
-.pytest_cache/
-.coverage
-htmlcov/
-.tox/
+# Temporary files
+*.tmp
+*.temp
+.tmp/
 
-# Development
-.env
-.env.local
-*.log
-.ipynb_checkpoints/
-
-# Audio Ops Framework
-mlruns/
+# Data directories (large, can be regenerated)
+dagster_home/
 mlflow/
-data/
-outputs/
-logs/
+minio_storage/
+influxdb_data/
+grafana_data/
+label_studio_data/
 models/
-checkpoints/
-.cache/
-tmp/
-temp/
-
-# Audio files (large)
-*.wav
-*.mp3
-*.flac
-*.ogg
-
-# Model files
-*.pb
-*.pth
-*.ckpt
-
-# Docker
-Dockerfile
-docker-compose.yml
-docker-compose.*.yml
 
 # CI/CD
 .github/
 .gitlab-ci.yml
+.circleci/
+.travis.yml
 
-# Documentation
-docs/_build/
-
-# Node (if any frontend)
-node_modules/
-npm-debug.log
-
-# OS
-.DS_Store
-Thumbs.db
+# Docker
+Dockerfile*
+docker-compose*.yml
+.dockerignore

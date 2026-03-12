@@ -1,0 +1,87 @@
+[tool.poetry]
+name = "audio-ops-inference"
+version = "1.0.0"
+description = "FastAPI inference service - minimal model serving stack"
+authors = ["Your Name <you@example.com>"]
+license = "MIT"
+package-mode = false
+# ════════════════════════════════════════════════════════════════════════════
+# Inference Service Dependencies
+# Minimal stack: FastAPI, model serving only
+# NO training, NO transformers (unless pre-trained models need them)
+# ════════════════════════════════════════════════════════════════════════════
+[tool.poetry.dependencies]
+python = "^3.10"
+
+# Shared core (from root)
+pyyaml = "^6"
+python-dotenv = "^1"
+pydantic = "^2"
+pydantic-settings = "^2"
+structlog = "^23"
+python-json-logger = "^2"
+
+# API & Serving (core)
+fastapi = "^0.104"
+uvicorn = {version = "^0.24", extras = ["standard"]}
+python-multipart = "^0.0.6"
+
+# Model Inference (minimal)
+torch = "^2"
+torchaudio = "^2"
+librosa = "^0.10"
+numpy = "^1.24"
+
+# Storage (for loading/saving models)
+minio = "^7.2"
+influxdb-client = "^1.18"
+
+# Optional: Only if serving specific model types
+# transformers = {version = "^4.30", optional = true}
+
+# ════════════════════════════════════════════════════════════════════════════
+# Development Dependencies
+# ════════════════════════════════════════════════════════════════════════════
+[tool.poetry.group.dev.dependencies]
+pytest = "^7.4"
+pytest-cov = "^4.1"
+pytest-asyncio = "^0.21"
+black = "^23"
+flake8 = "^6.1"
+mypy = "^1.7"
+isort = "^5.13"
+httpx = "^0.24"
+
+[tool.black]
+line-length = 100
+target-version = ["py310", "py311"]
+
+[tool.isort]
+profile = "black"
+line-length = 100
+
+[tool.mypy]
+python_version = "3.10"
+
+[[tool.mypy.overrides]]
+module = [
+    "librosa.*",
+    "minio.*",
+    "influxdb_client.*",
+    "torch.*",
+    "torchaudio.*",
+]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+testpaths = ["tests"]
+markers = [
+    "unit: Unit tests",
+    "integration: Integration tests",
+    "slow: Slow tests",
+]
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"

@@ -1,0 +1,190 @@
+# Inference Service Configuration
+# FastAPI model serving configuration
+
+inference:
+  # Server configuration
+  host: 0.0.0.0
+  port: 8000
+  workers: 4
+  reload: true
+  
+  # Logging
+  log_level: INFO
+  
+  # Model configuration
+  models:
+    # Sentiment Analysis
+    sentiment_analysis:
+      enabled: true
+      model_path: /app/dagster_output/sentiment_model
+      model_type: pytorch  # pytorch, tensorflow, onnx, sklearn
+      version: "1.0.0"
+      max_batch_size: 32
+      timeout_seconds: 30
+      cache_enabled: true
+      cache_size_mb: 512
+    
+    # Speech Quality Assessment
+    speech_quality:
+      enabled: true
+      model_path: /app/dagster_output/quality_model
+      model_type: pytorch
+      version: "1.0.0"
+      max_batch_size: 16
+      timeout_seconds: 30
+      cache_enabled: true
+      cache_size_mb: 256
+    
+    # Non-Verbal Components Detection
+    nonverbal_detection:
+      enabled: true
+      model_path: /app/dagster_output/nonverbal_model
+      model_type: pytorch
+      version: "1.0.0"
+      max_batch_size: 32
+      timeout_seconds: 30
+      cache_enabled: true
+      cache_size_mb: 512
+    
+    # Text-to-Speech
+    tts:
+      enabled: true
+      model_path: /app/dagster_output/tts_model
+      model_type: pytorch
+      version: "1.0.0"
+      max_batch_size: 8
+      timeout_seconds: 60
+      cache_enabled: true
+      cache_size_mb: 1024
+
+# Input/Output configuration
+io:
+  # Audio input settings
+  audio:
+    supported_formats: [wav, mp3, flac, ogg]
+    max_file_size_mb: 100
+    sample_rate: 16000
+    channels: 1
+    bit_depth: 16
+  
+  # Output settings
+  output:
+    format: json
+    include_metadata: true
+    include_confidence_scores: true
+
+# API endpoints
+endpoints:
+  - path: /health
+    method: GET
+    description: "Health check endpoint"
+  
+  - path: /models
+    method: GET
+    description: "List available models and versions"
+  
+  - path: /sentiment/analyze
+    method: POST
+    description: "Analyze sentiment from audio"
+    models: [sentiment_analysis]
+  
+  - path: /quality/assess
+    method: POST
+    description: "Assess speech quality"
+    models: [speech_quality]
+  
+  - path: /detect/nonverbal
+    method: POST
+    description: "Detect non-verbal components"
+    models: [nonverbal_detection]
+  
+  - path: /tts/synthesize
+    method: POST
+    description: "Text-to-speech synthesis"
+    models: [tts]
+  
+  - path: /batch/process
+    method: POST
+    description: "Batch process multiple audio files"
+    max_batch_size: 10
+
+# Performance settings
+performance:
+  # GPU settings
+  gpu:
+    enabled: true
+    device: cuda:0  # or cpu
+    memory_growth: true  # For TensorFlow
+  
+  # Thread pool settings
+  thread_pool:
+    max_workers: 8
+  
+  # Request queuing
+  queue:
+    max_queue_size: 100
+    max_wait_time_seconds: 60
+
+# Model loading strategy
+model_loading:
+  strategy: lazy  # lazy or eager
+  preload_on_startup: []  # Models to preload
+  max_loaded_models: 3  # Maximum models to keep in memory
+
+# Monitoring and metrics
+monitoring:
+  enable_metrics: true
+  metrics_port: 8001
+  
+  metrics:
+    - inference_time_ms
+    - model_load_time_ms
+    - request_count
+    - error_count
+    - cache_hit_rate
+    - gpu_utilization
+    - memory_usage
+
+# Caching strategy
+cache:
+  enabled: true
+  type: lru  # lru or fifo
+  ttl_seconds: 3600
+  
+  backends:
+    memory:
+      enabled: true
+      max_size_mb: 2048
+    
+    redis:
+      enabled: false
+      host: localhost
+      port: 6379
+      db: 0
+      ttl_seconds: 3600
+
+# Error handling
+error_handling:
+  return_detailed_errors: true
+  log_errors: true
+  fallback_model: null  # Model to use if primary fails
+
+# Demo audio configuration
+demo:
+  enabled: true
+  demo_audio_dir: /app/demo_audio
+  sample_files:
+    - name: positive_sentiment.wav
+      description: "Sample with positive sentiment"
+    - name: negative_sentiment.wav
+      description: "Sample with negative sentiment"
+    - name: clear_speech.wav
+      description: "Clear quality speech"
+    - name: noisy_speech.wav
+      description: "Noisy speech sample"
+
+# Authentication (if needed)
+auth:
+  enabled: false
+  token_header: X-API-Key
+  # Use .env or secrets manager for tokens

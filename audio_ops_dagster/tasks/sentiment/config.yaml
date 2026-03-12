@@ -1,0 +1,12 @@
+feature_type: spectrogram
+input_dir: "audio_input/sentiment/CrowdAudioDataport"
+split_strategy: "group"
+num_classes: 3
+class_labels: 
+  - "approval"
+  - "disapproval"
+  - "neutral"
+model_architecture: resnet18
+batch_size: 32
+epochs: 10
+learning_rate: 0.001

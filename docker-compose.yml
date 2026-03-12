@@ -1,0 +1,282 @@
+version: '3.8'
+
+services:
+  # ════════════════════════════════════════════════════════════════════════════
+  # Orchestration & Workflow
+  # ════════════════════════════════════════════════════════════════════════════
+
+  dagster:
+      build:
+        context: .
+        dockerfile: ./audio_ops_dagster/Dockerfile.dagster
+      container_name: audio-ops-dagster
+      ports:
+        - "${DAGSTER_PORT}:3000"
+      environment:
+        - DAGSTER_HOME=${DAGSTER_HOME}
+        - DAGSTER_AUDIO_TASK=${DAGSTER_AUDIO_TASK:-sentiment} # Dynamic task selection
+        - MINIO_ENDPOINT=minio:9000
+        - MINIO_ACCESS_KEY=${MINIO_ROOT_USER}
+        - MINIO_SECRET_KEY=${MINIO_ROOT_PASSWORD}
+        - MLFLOW_TRACKING_URI=${MLFLOW_TRACKING_URI}
+        - INFLUXDB_HOST=influxdb
+        - INFLUXDB_PORT=8086
+        - INFLUXDB_USER=${INFLUXDB_ADMIN_USER}
+        - INFLUXDB_PASSWORD=${INFLUXDB_ADMIN_PASSWORD}
+      entrypoint: ["dagster-webserver", "-h", "0.0.0.0", "-p", "3000", "-w", "/app/workspace.yaml"]
+      volumes:
+        - ./dagster_home:${DAGSTER_HOME}
+        - ./config:/app/config
+        - .:/app                         # Mount current dir to /app for live code updates
+        - ./storage:/app/storage     # Persistent storage for features/checkpoints
+        - ./audio_input:/app/audio_input # Map your local audio files to the container
+      depends_on:
+        - minio
+        - mlflow
+        - influxdb
+      networks:
+        - audio-ops
+      restart: unless-stopped
+      deploy:
+        resources:
+          reservations:
+            devices:
+              - driver: nvidia
+                count: 1
+                capabilities: [gpu]
+      healthcheck:
+        test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+        interval: 30s
+        timeout: 10s
+        retries: 3
+        start_period: 40s
+    
+  dagster-daemon:
+    build:
+      context: .
+      dockerfile: ./audio_ops_dagster/Dockerfile.dagster
+    container_name: audio-ops-daemon
+    # The daemon runs the background processes
+    entrypoint: ["dagster-daemon", "run", "-w", "/app/workspace.yaml"]
+    environment:
+      - DAGSTER_HOME=${DAGSTER_HOME}
+      - DAGSTER_AUDIO_TASK=${DAGSTER_AUDIO_TASK:-sentiment}
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=${MINIO_ROOT_USER}
+      - MINIO_SECRET_KEY=${MINIO_ROOT_PASSWORD}
+      - MLFLOW_TRACKING_URI=${MLFLOW_TRACKING_URI}
+    volumes:
+      - ./dagster_home:${DAGSTER_HOME}
+      - ./config:/app/config
+      - .:/app
+      - ./storage:/app/storage
+      - ./audio_input:/app/audio_input
+    depends_on:
+      - dagster
+      - minio
+      - influxdb
+    networks:
+      - audio-ops
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # Inference & Model Serving
+  # ════════════════════════════════════════════════════════════════════════════
+
+  inference:
+    build:
+      context: .
+      dockerfile: ./audio-ops-inference/Dockerfile.inference
+    container_name: audio-ops-inference
+    ports:
+      - "${INFERENCE_PORT}:8000"
+    environment:
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=${MINIO_ROOT_USER}
+      - MINIO_SECRET_KEY=${MINIO_ROOT_PASSWORD}
+      - MLFLOW_TRACKING_URI=${MLFLOW_TRACKING_URI}
+      - API_SECRET_KEY=${API_SECRET_KEY}
+    volumes:
+      - .:/app                         # Share code with inference service too
+      - ./config:/app/config
+      - ./storage:/app/storage     # Access the models trained by Dagster
+    depends_on:
+      - minio
+      - mlflow
+    networks:
+      - audio-ops
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # Experiment Tracking
+  # ════════════════════════════════════════════════════════════════════════════
+
+  mlflow:
+    build:
+      context: .
+      dockerfile: ./mlflow/Dockerfile.mlflow
+    container_name: audio-ops-mlflow
+    environment:
+      - MLFLOW_ALLOWED_HOSTS=${MLFLOW_ALLOWED_HOSTS}
+    ports:
+      - "${MLFLOW_PORT}:5000"
+    entrypoint: >
+      /bin/sh -c "mlflow server 
+      --host 0.0.0.0 
+      --port 5000 
+      --backend-store-uri sqlite:////mlflow/data/mlflow.db 
+      --default-artifact-root /mlflow/artifacts 
+      --allowed-hosts \"$$MLFLOW_ALLOWED_HOSTS\""
+    volumes:
+      - ./mlflow/data:/mlflow/data
+      - ./mlflow/artifacts:/mlflow/artifacts
+    networks:
+      - audio-ops
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # Object Storage (S3-compatible)
+  # ════════════════════════════════════════════════════════════════════════════
+
+  minio:
+    image: minio/minio:latest
+    container_name: audio-ops-minio
+    ports:
+      - "${MINIO_PORT}:9000"
+      - "${MINIO_CONSOLE_PORT}:9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    volumes:
+      - ./minio_storage:/data
+    command: server /data --console-address ":9001"
+    networks:
+      - audio-ops
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # Time-Series Database
+  # ════════════════════════════════════════════════════════════════════════════
+
+  influxdb:
+    image: influxdb:2.7-alpine
+    container_name: audio-ops-influxdb
+    ports:
+      - "${INFLUXDB_PORT}:8086"
+    environment:
+      INFLUXDB_DB: audio-ops
+      INFLUXDB_ADMIN_USER: ${INFLUXDB_ADMIN_USER}
+      INFLUXDB_ADMIN_PASSWORD: ${INFLUXDB_ADMIN_PASSWORD}
+      INFLUXDB_HTTP_AUTH_ENABLED: "true"
+      INFLUXDB_BUCKET: ${INFLUXDB_BUCKET:-audio-ops}
+      INFLUXDB_ORG: ${INFLUXDB_ORG:-audio-org}
+      INFLUXDB_TOKEN: ${INFLUXDB_TOKEN:-change-me}
+    volumes:
+      - ./influxdb_data:/var/lib/influxdb2
+    networks:
+      - audio-ops
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8086/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # Data Visualization & Dashboards
+  # ════════════════════════════════════════════════════════════════════════════
+
+  grafana:
+    image: grafana/grafana:latest
+    user: "0"  # Run as root
+    container_name: audio-ops-grafana
+    ports:
+      - "${GRAFANA_PORT}:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}
+      GF_INSTALL_PLUGINS: grafana-piechart-panel
+    volumes:
+      - ./grafana_data:/var/lib/grafana
+    depends_on:
+      - influxdb
+    networks:
+      - audio-ops
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # Data Labeling & Annotation
+  # ════════════════════════════════════════════════════════════════════════════
+
+  label-studio:
+    image: heartexlabs/label-studio:latest
+    user: "0"  # Run as root
+    container_name: audio-ops-label-studio
+    ports:
+      - "${LABEL_STUDIO_PORT}:8080"
+    environment:
+      LABEL_STUDIO_HOST: 0.0.0.0
+      LABEL_STUDIO_PORT: 8080
+    volumes:
+      - ./label_studio_data:/label-studio/data
+    networks:
+      - audio-ops
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+networks:
+  audio-ops:
+    driver: bridge
+
+volumes:
+  dagster_home:
+  mlflow_data:
+  mlflow_artifacts:
+  minio_storage:
+  influxdb_data:
+  grafana_data:
+  label_studio_data:

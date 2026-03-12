@@ -1,0 +1,103 @@
+[tool.poetry]
+name = "audio-ops-dagster"
+version = "1.0.0"
+description = "Dagster orchestration service with full ML/training stack"
+authors = ["Your Name <you@example.com>"]
+license = "MIT"
+package-mode = false
+# ════════════════════════════════════════════════════════════════════════════
+# Dagster Service Dependencies
+# Full ML stack: orchestration, training, experiment tracking, model management
+# ════════════════════════════════════════════════════════════════════════════
+[tool.dagster]
+module_name = "audio_ops_dagster.definitions"
+
+[tool.poetry.dependencies]
+python = "^3.10"
+
+# Shared core (from root)
+pyyaml = "^6"
+python-dotenv = "^1"
+pydantic = "^2"
+pydantic-settings = "^2"
+structlog = "^23"
+python-json-logger = "^2"
+
+# Orchestration & Workflow
+dagster = "^1.6"
+dagster-webserver = "^1.6"
+
+# ML & Audio (full stack for training)
+torch = "^2.2.0"
+torchaudio = "^2.2.0"
+torchvision = "^0.17.0" 
+librosa = "^0.10"
+numpy = "^1.24"
+scipy = "^1.11"
+pandas = "^2"
+scikit-learn = "^1.2"  
+
+# NLP & Transformers (for training tasks)
+transformers = "^4.30"
+datasets = "^2.14"
+
+# Experiment Tracking & MLOps
+mlflow = "^2.12"
+
+# Storage & Database
+minio = "^7.2"
+influxdb-client = "^1.18"
+sqlalchemy = "^2"
+
+# ════════════════════════════════════════════════════════════════════════════
+# Development Dependencies
+# ════════════════════════════════════════════════════════════════════════════
+[tool.poetry.group.dev.dependencies]
+pytest = "^7.4"
+pytest-cov = "^4.1"
+pytest-asyncio = "^0.21"
+black = "^23"
+flake8 = "^6.1"
+mypy = "^1.7"
+isort = "^5.13"
+jupyter = "^1"
+ipython = "^8.17"
+
+[tool.black]
+line-length = 100
+target-version = ["py310", "py311"]
+
+[tool.isort]
+profile = "black"
+line-length = 100
+
+[tool.mypy]
+python_version = "3.10"
+
+[[tool.mypy.overrides]]
+module = [
+"librosa.*",
+    "minio.*",
+    "influxdb_client.*",
+    "dagster.*",
+    "torch.*",
+    "torchaudio.*",
+    "torchvision.*",      
+    "transformers.*",
+    "sklearn.*",          
+]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+testpaths = ["tests"]
+markers = [
+    "unit: Unit tests",
+    "integration: Integration tests",
+    "slow: Slow tests",
+    "gpu: GPU tests",
+]
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
