@@ -7,11 +7,14 @@ from torch.utils.data import Dataset
 from sklearn.model_selection import train_test_split
 
 class AudioDataset(Dataset):
-    def __init__(self, csv_path, feature_dir=None, label_to_idx=None):
+    def __init__(self, csv_path, feature_dir=None, label_to_idx=None, is_sequence=False):
         self.df = pd.read_csv(csv_path)
         self.feature_dir = Path(feature_dir) if feature_dir else Path.cwd()
+    
+        self.is_sequence = is_sequence # Set this to True for STT
         
-        if label_to_idx is None:
+        # Only build label_to_idx for classification tasks
+        if not is_sequence and label_to_idx is None:
             unique_labels = sorted(self.df['label'].unique())
             self.label_to_idx = {label: i for i, label in enumerate(unique_labels)}
         else:
@@ -25,8 +28,8 @@ class AudioDataset(Dataset):
         if feature.ndim == 2:
             feature = np.expand_dims(feature, axis=0) 
         
-        label = self.label_to_idx[row['label']]
-        return torch.tensor(feature, dtype=torch.float32), torch.tensor(label, dtype=torch.long)
+        label = row['label'] if self.is_sequence else self.label_to_idx[row['label']]
+        return torch.tensor(feature, dtype=torch.float32), label
 
     @staticmethod
     def create_splits_csv(feature_dir: str, output_dir: str, ratios=(0.7, 0.15, 0.15), strategy="random"):
@@ -106,3 +109,17 @@ class AudioDataset(Dataset):
             "val": str(out / "val.csv"),
             "test": str(out / "test.csv")
         }
+        
+class InferenceDataset(Dataset):
+    def __init__(self, feature_dir):
+        self.path = Path(feature_dir)
+        self.files = list(self.path.rglob("*.npy"))
+        self.file_names = [f.name for f in self.files]
+
+    def __len__(self): return len(self.files)
+
+    def __getitem__(self, idx):
+        feature = np.load(self.files[idx])
+        if feature.ndim == 2:
+            feature = np.expand_dims(feature, axis=0)
+        return torch.tensor(feature, dtype=torch.float32), self.file_names[idx]

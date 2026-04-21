@@ -1,0 +1,413 @@
+{
+  "uid": "audio_ops_overview",
+  "title": "Audio Ops — Overview",
+  "description": "Real-time inference results, training metrics, and stream health",
+  "tags": ["audio-ops", "inference", "training"],
+  "timezone": "browser",
+  "refresh": "5s",
+  "time": { "from": "now-1h", "to": "now" },
+  "schemaVersion": 38,
+  "version": 1,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "panels": [
+    {
+      "id": 1,
+      "type": "row",
+      "title": "🔴 Live Stream Inference",
+      "collapsed": false,
+      "gridPos": { "x": 0, "y": 0, "w": 24, "h": 1 }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Active Streams",
+      "description": "Number of RTSP streams currently being processed",
+      "gridPos": { "x": 0, "y": 1, "w": 4, "h": 4 },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "orientation": "auto",
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": 0 },
+              { "color": "green", "value": 1 }
+            ]
+          },
+          "mappings": []
+        }
+      },
+      "targets": [
+        {
+          "datasource": { "uid": "influxdb_audio_ops" },
+          "query": "from(bucket: \"audio_metrics\")\n  |> range(start: -1m)\n  |> filter(fn: (r) => r._measurement == \"stream_health\")\n  |> filter(fn: (r) => r._field == \"active\")\n  |> filter(fn: (r) => r._value == 1)\n  |> distinct(column: \"stream_id\")\n  |> count()\n  |> yield(name: \"active_streams\")",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Inferences / min",
+      "description": "Inference throughput in the last minute",
+      "gridPos": { "x": 4, "y": 1, "w": 4, "h": 4 },
+      "options": {
+        "reduceOptions": { "calcs": ["sum"] },
+        "colorMode": "background",
+        "graphMode": "area"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "blue", "value": 0 },
+              { "color": "green", "value": 10 }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "datasource": { "uid": "influxdb_audio_ops" },
+          "query": "from(bucket: \"audio_metrics\")\n  |> range(start: -1m)\n  |> filter(fn: (r) => r._measurement =~ /^inference_/ or r._measurement =~ /^stream_/)\n  |> filter(fn: (r) => r._field == \"confidence\")\n  |> count()\n  |> yield(name: \"inference_count\")",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Avg Confidence",
+      "gridPos": { "x": 8, "y": 1, "w": 4, "h": 4 },
+      "options": {
+        "reduceOptions": { "calcs": ["mean"] },
+        "colorMode": "background",
+        "graphMode": "area"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": 0 },
+              { "color": "yellow", "value": 0.6 },
+              { "color": "green", "value": 0.85 }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "datasource": { "uid": "influxdb_audio_ops" },
+          "query": "from(bucket: \"audio_metrics\")\n  |> range(start: -5m)\n  |> filter(fn: (r) => r._measurement =~ /^inference_/)\n  |> filter(fn: (r) => r._field == \"confidence\")\n  |> mean()\n  |> yield(name: \"avg_confidence\")",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "Avg Audio RMS",
+      "description": "Average signal level (loudness indicator)",
+      "gridPos": { "x": 12, "y": 1, "w": 4, "h": 4 },
+      "options": {
+        "reduceOptions": { "calcs": ["mean"] },
+        "colorMode": "value",
+        "graphMode": "area"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 4,
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "blue", "value": 0 },
+              { "color": "green", "value": 0.01 }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "datasource": { "uid": "influxdb_audio_ops" },
+          "query": "from(bucket: \"audio_metrics\")\n  |> range(start: -5m)\n  |> filter(fn: (r) => r._measurement =~ /^(inference_|stream_)/)\n  |> filter(fn: (r) => r._field == \"rms\")\n  |> mean()\n  |> yield(name: \"avg_rms\")",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Inference Confidence Over Time — by Task",
+      "gridPos": { "x": 0, "y": 5, "w": 16, "h": 8 },
+      "options": {
+        "legend": { "calcs": ["mean", "last"], "displayMode": "table", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "custom": { "lineWidth": 2, "fillOpacity": 10 }
+        }
+      },
+      "targets": [
+        {
+          "datasource": { "uid": "influxdb_audio_ops" },
+          "query": "from(bucket: \"audio_metrics\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement =~ /^(inference_|stream_)/)\n  |> filter(fn: (r) => r._field == \"confidence\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> map(fn: (r) => ({ r with _field: r.task }))\n  |> yield(name: \"confidence_by_task\")",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "piechart",
+      "title": "Prediction Distribution",
+      "description": "Distribution of predicted labels",
+      "gridPos": { "x": 16, "y": 5, "w": 8, "h": 8 },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "right" },
+        "pieType": "donut"
+      },
+      "targets": [
+        {
+          "datasource": { "uid": "influxdb_audio_ops" },
+          "query": "from(bucket: \"audio_metrics\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement =~ /^inference_/)\n  |> filter(fn: (r) => r._field == \"label\")\n  |> group(columns: [\"_value\"])\n  |> count()\n  |> group()\n  |> map(fn: (r) => ({ _field: r._value, _value: float(v: r._value) }))\n  |> yield(name: \"label_distribution\")",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Audio RMS (Signal Level)",
+      "description": "Raw audio energy per stream",
+      "gridPos": { "x": 0, "y": 13, "w": 12, "h": 6 },
+      "options": {
+        "legend": { "calcs": ["mean"], "displayMode": "table", "placement": "bottom" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "lineWidth": 1, "fillOpacity": 20 }
+        }
+      },
+      "targets": [
+        {
+          "datasource": { "uid": "influxdb_audio_ops" },
+          "query": "from(bucket: \"audio_metrics\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement =~ /^(inference_|stream_)/)\n  |> filter(fn: (r) => r._field == \"rms\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> map(fn: (r) => ({ r with _field: r.stream_id }))\n  |> yield(name: \"rms_by_stream\")",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "type": "table",
+      "title": "Latest Inference Results",
+      "gridPos": { "x": 12, "y": 13, "w": 12, "h": 6 },
+      "options": {
+        "sortBy": [{ "displayName": "Time", "desc": true }],
+        "footer": { "show": false }
+      },
+      "fieldConfig": {
+        "defaults": { "custom": { "align": "auto" } },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "confidence" },
+            "properties": [
+              { "id": "unit", "value": "percentunit" },
+              { "id": "custom.displayMode", "value": "color-background" },
+              { "id": "thresholds", "value": { "steps": [{ "color": "red", "value": 0 }, { "color": "yellow", "value": 0.6 }, { "color": "green", "value": 0.85 }] } }
+            ]
+          }
+        ]
+      },
+      "targets": [
+        {
+          "datasource": { "uid": "influxdb_audio_ops" },
+          "query": "from(bucket: \"audio_metrics\")\n  |> range(start: -10m)\n  |> filter(fn: (r) => r._measurement =~ /^inference_/)\n  |> filter(fn: (r) => r._field == \"confidence\" or r._field == \"label\" or r._field == \"rms\")\n  |> pivot(rowKey:[\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> keep(columns: [\"_time\", \"task\", \"model\", \"source_type\", \"stream_id\", \"confidence\", \"label\", \"rms\"])\n  |> sort(columns: [\"_time\"], desc: true)\n  |> limit(n: 50)\n  |> yield(name: \"latest_inferences\")",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "type": "row",
+      "title": "🎓 Training Metrics",
+      "collapsed": false,
+      "gridPos": { "x": 0, "y": 19, "w": 24, "h": 1 }
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Training Loss",
+      "gridPos": { "x": 0, "y": 20, "w": 12, "h": 8 },
+      "options": {
+        "legend": { "calcs": ["last", "min"], "displayMode": "table", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "lineWidth": 2 }
+        }
+      },
+      "targets": [
+        {
+          "datasource": { "uid": "influxdb_audio_ops" },
+          "query": "from(bucket: \"audio_metrics\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement =~ /^training_/ and not (r._measurement =~ /_batch$/))\n  |> filter(fn: (r) => r._field == \"train_loss\" or r._field == \"val_loss\")\n  |> map(fn: (r) => ({ r with _field: r.task + \"/\" + r._field }))\n  |> yield(name: \"training_loss\")",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Validation Accuracy",
+      "gridPos": { "x": 12, "y": 20, "w": 12, "h": 8 },
+      "options": {
+        "legend": { "calcs": ["last", "max"], "displayMode": "table", "placement": "bottom" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "custom": { "lineWidth": 2 }
+        }
+      },
+      "targets": [
+        {
+          "datasource": { "uid": "influxdb_audio_ops" },
+          "query": "from(bucket: \"audio_metrics\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement =~ /^training_/ and not (r._measurement =~ /_batch$/))\n  |> filter(fn: (r) => r._field == \"val_acc\" or r._field == \"train_acc\")\n  |> map(fn: (r) => ({ r with _field: r.task + \"/\" + r._field }))\n  |> yield(name: \"accuracy\")",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "Learning Rate Schedule",
+      "gridPos": { "x": 0, "y": 28, "w": 12, "h": 5 },
+      "options": {
+        "legend": { "calcs": ["last"], "displayMode": "list" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "lineWidth": 1, "fillOpacity": 10 }
+        }
+      },
+      "targets": [
+        {
+          "datasource": { "uid": "influxdb_audio_ops" },
+          "query": "from(bucket: \"audio_metrics\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement =~ /^training_/)\n  |> filter(fn: (r) => r._field == \"learning_rate\")\n  |> map(fn: (r) => ({ r with _field: r.task + \"/lr\" }))\n  |> yield(name: \"lr\")",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "Batch Loss (high-frequency)",
+      "gridPos": { "x": 12, "y": 28, "w": 12, "h": 5 },
+      "options": {
+        "legend": { "displayMode": "list" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "lineWidth": 1 }
+        }
+      },
+      "targets": [
+        {
+          "datasource": { "uid": "influxdb_audio_ops" },
+          "query": "from(bucket: \"audio_metrics\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement =~ /_batch$/)\n  |> filter(fn: (r) => r._field == \"loss\")\n  |> map(fn: (r) => ({ r with _field: r.task + \"/batch_loss\" }))\n  |> yield(name: \"batch_loss\")",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 15,
+      "type": "row",
+      "title": "📝 Speech-to-Text",
+      "collapsed": false,
+      "gridPos": { "x": 0, "y": 33, "w": 24, "h": 1 }
+    },
+    {
+      "id": 16,
+      "type": "timeseries",
+      "title": "Word Count Over Time",
+      "gridPos": { "x": 0, "y": 34, "w": 12, "h": 6 },
+      "targets": [
+        {
+          "datasource": { "uid": "influxdb_audio_ops" },
+          "query": "from(bucket: \"audio_metrics\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"inference_speech_to_text\")\n  |> filter(fn: (r) => r._field == \"word_count\")\n  |> aggregateWindow(every: v.windowPeriod, fn: sum, createEmpty: false)\n  |> yield(name: \"word_count\")",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 17,
+      "type": "logs",
+      "title": "Recent Transcripts",
+      "description": "Latest speech-to-text outputs",
+      "gridPos": { "x": 12, "y": 34, "w": 12, "h": 6 },
+      "options": { "dedupStrategy": "none", "enableLogDetails": true, "wrapLogMessage": true },
+      "targets": [
+        {
+          "datasource": { "uid": "influxdb_audio_ops" },
+          "query": "from(bucket: \"audio_metrics\")\n  |> range(start: -30m)\n  |> filter(fn: (r) => r._measurement == \"inference_speech_to_text\")\n  |> filter(fn: (r) => r._field == \"transcript\")\n  |> sort(columns: [\"_time\"], desc: true)\n  |> limit(n: 20)\n  |> yield(name: \"transcripts\")",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 18,
+      "type": "row",
+      "title": "⚙️ System Health",
+      "collapsed": true,
+      "gridPos": { "x": 0, "y": 40, "w": 24, "h": 1 },
+      "panels": [
+        {
+          "id": 19,
+          "type": "timeseries",
+          "title": "Stream Frame Rate",
+          "gridPos": { "x": 0, "y": 41, "w": 12, "h": 5 },
+          "targets": [
+            {
+              "datasource": { "uid": "influxdb_audio_ops" },
+              "query": "from(bucket: \"audio_metrics\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"stream_health\")\n  |> filter(fn: (r) => r._field == \"frames_processed\")\n  |> derivative(unit: 1s, nonNegative: true)\n  |> map(fn: (r) => ({ r with _field: r.stream_id + \"/fps\" }))\n  |> yield(name: \"frame_rate\")",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 20,
+          "type": "timeseries",
+          "title": "Queue Depth",
+          "gridPos": { "x": 12, "y": 41, "w": 12, "h": 5 },
+          "targets": [
+            {
+              "datasource": { "uid": "influxdb_audio_ops" },
+              "query": "from(bucket: \"audio_metrics\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"stream_health\")\n  |> filter(fn: (r) => r._field == \"ingest_queue_depth\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"queue_depth\")",
+              "refId": "A"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

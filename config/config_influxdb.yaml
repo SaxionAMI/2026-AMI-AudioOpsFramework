@@ -1,6 +1,8 @@
 # InfluxDB Configuration
 # Time-series database for audio metrics and monitoring
 
+#API operator key g9hn0MWdbLm83GpLCsNGp4vDmdRxEW5sPjdrJCXOSVHCqzXkZVbxsiscnWB-yu02FtKeVWrl9eGoWvuBtjHaFQ==
+
 influxdb:
   # Connection settings
   host: influxdb
@@ -16,7 +18,7 @@ influxdb:
   # Authentication
   admin_username: admin
   admin_password: admin123  # Change in production!
-  admin_token: audioopstoken  # Change in production!
+  admin_token: g9hn0MWdbLm83GpLCsNGp4vDmdRxEW5sPjdrJCXOSVHCqzXkZVbxsiscnWB-yu02FtKeVWrl9eGoWvuBtjHaFQ==  # Change in production!
   
   # Default retention policy
   retention_policies:

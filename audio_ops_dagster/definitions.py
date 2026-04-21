@@ -1,3 +1,13 @@
+"""
+definitions.py — Dagster Definitions entry point.
+
+v2 additions:
+  • InfluxDBMetricsResource registered as "influxdb_metrics"
+  • All assets now have access to time-series logging
+  • Grafana dashboard auto-provisioning on startup
+  • Stream inference sensor + jobs wired in
+"""
+
 import os
 import yaml
 import sys
@@ -5,17 +15,26 @@ from pathlib import Path
 from typing import Optional, List
 from dagster import Definitions, ConfigurableResource
 import inspect
-# Force path resolution
+
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from audio_ops_dagster.registry import TaskConfig, discover_tasks
 from audio_ops_dagster.assets import build_audio_assets
 from audio_ops_dagster.jobs import build_audio_jobs
+from audio_ops_dagster.core.storage_resource import MinIOStorageResource
+from audio_ops_dagster.core.influxdb_resource import InfluxDBMetricsResource
+from audio_ops_dagster.streaming.dagster_stream_sensor import (
+    stream_discovery_sensor,
+    stream_inference_job,
+    stream_config_asset,
+    stream_status_asset,
+)
 
-# 1. Automatic Code Discovery (finds the @register_task classes)
+# ── 1. Automatic task code discovery ─────────────────────────────────────────
 discover_tasks()
 
-# 2. Resource Class definition
+
+# ── 2. AudioTaskResource — mirrors TaskConfig + orchestration-only fields ────
 class AudioTaskResource(ConfigurableResource):
     task_name: str
     input_dir: str
@@ -30,57 +49,65 @@ class AudioTaskResource(ConfigurableResource):
     criterion: str = "cross_entropy"
     model_architecture: str = "cnn"
     split_strategy: str = "random"
+    input_shape: Optional[List[int]] = None
+    use_remote_storage: bool = False
+    storage_bucket_prefix: str = ""
+    model_name: Optional[str] = None
 
     def to_task_config(self) -> TaskConfig:
         data = self.dict()
-        
-        # Get what the dataclass expects
         expected_keys = set(inspect.signature(TaskConfig).parameters.keys())
-        provided_keys = set(data.keys())
-
-        # OPTIONAL: Catch typos during development
-        # This will warn you if you put something in YAML that TaskConfig ignores
-        ignored = provided_keys - expected_keys
-        if ignored:
-            # We log it so you know it's not being passed to the model
-            print(f"DEBUG: The following keys are orchestration-only: {ignored}")
-
         filtered_data = {k: v for k, v in data.items() if k in expected_keys}
         return TaskConfig(**filtered_data)
 
-# 3. Iterate through all task folders to build the Definitions
+
+# ── 3. Build shared resources from environment variables ─────────────────────
+minio_storage_resource = MinIOStorageResource.from_env()
+influxdb_metrics_resource = InfluxDBMetricsResource.from_env()
+
+
+# ── 4. Iterate task folders and build assets/jobs ────────────────────────────
 all_assets = []
 all_jobs = []
-all_resources = {}
+all_resources = {
+    "minio_storage": minio_storage_resource,
+    "influxdb_metrics": influxdb_metrics_resource,
+}
 
-# Locate the tasks directory
 tasks_root = Path(__file__).parent / "tasks"
 
 if tasks_root.exists():
     for task_dir in tasks_root.iterdir():
-        # Look for folders containing a config.yaml
         if task_dir.is_dir() and (task_dir / "config.yaml").exists():
             task_name = task_dir.name
             resource_key = f"{task_name}_config"
-            
-            # Load the YAML config
+
             with open(task_dir / "config.yaml") as f:
                 data = yaml.safe_load(f)
-                # Apply defaults
+
+                data["task_name"] = task_name
                 data.setdefault("input_dir", "audio_input/")
                 data.setdefault("output_dir", f"storage/{task_name}/")
-                
-                # Create the resource instance
-                res_instance = AudioTaskResource(task_name=task_name, **data)
+
+                valid_fields = set(AudioTaskResource.__fields__.keys())
+                filtered = {k: v for k, v in data.items() if k in valid_fields}
+
+                res_instance = AudioTaskResource(**filtered)
                 all_resources[resource_key] = res_instance
-            
-            # Build assets and jobs for this specific task
+
             all_assets.extend(build_audio_assets(task_name, resource_key))
             all_jobs.extend(build_audio_jobs(task_name))
 
-# 4. Final Aggregated Definitions
+
+# ── 5. Streaming assets and jobs ─────────────────────────────────────────────
+all_assets += [stream_config_asset, stream_status_asset]
+all_jobs += [stream_inference_job]
+
+
+# ── 6. Final aggregated Definitions ──────────────────────────────────────────
 defs = Definitions(
     assets=all_assets,
     jobs=all_jobs,
-    resources=all_resources
+    resources=all_resources,
+    sensors=[stream_discovery_sensor],
 )
