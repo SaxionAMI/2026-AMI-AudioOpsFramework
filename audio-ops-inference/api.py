@@ -152,6 +152,7 @@ def _reconstruct_model(loaded, task: str):
         model.input_shape  = loaded.get("input_shape",        getattr(model, "input_shape", [1, 128, 87]))
         model.architecture = loaded.get("model_architecture", getattr(model, "architecture", ""))
         model.task_name    = loaded.get("task_name",          task)
+        model.feature_config = loaded.get("feature_config", {})
         logger.info("Loaded full model object for task '%s'", task)
         return model
 
@@ -220,14 +221,65 @@ class ModelWrapper:
         self.task_name   = task_name
         self.class_names: list[str] = getattr(model, "class_names", [])
         self.input_shape: list[int] = getattr(model, "input_shape", [1, 128, 87])
+        self.feature_cfg  = getattr(model, "feature_config", {
+            "feature_type": "spectrogram",
+            "sample_rate": 16000,
+            "n_mels": 128,
+            "n_fft": 512,
+            "hop_length": 160,
+            "clip_duration_s": 3.0,
+        })
+        
+    def _extract_features(self, audio: np.ndarray) -> "torch.Tensor":
+        import torch, librosa
+        cfg = self.feature_cfg
+        ft  = cfg.get("feature_type", "mel_spectrogram")
+
+        if ft == "mel_spectrogram":
+            mel     = librosa.feature.melspectrogram(
+                y=audio, sr=cfg["sample_rate"],
+                n_mels=cfg["n_mels"], n_fft=cfg["n_fft"],
+                hop_length=cfg["hop_length"],
+            )
+            features = librosa.power_to_db(mel, ref=np.max)
+            # Pad/trim to expected width from input_shape [C, H, W]
+            target_w = self.input_shape[2] if len(self.input_shape) == 3 else 87
+            if features.shape[1] < target_w:
+                features = np.pad(features, ((0,0),(0, target_w - features.shape[1])))
+            else:
+                features = features[:, :target_w]
+            tensor = torch.from_numpy(features).float().unsqueeze(0).unsqueeze(0)
+
+        elif ft == "waveform":
+            tensor = torch.from_numpy(audio).float().unsqueeze(0).unsqueeze(0)
+
+        elif ft == "spectrogram":
+            import torch
+            wave   = torch.from_numpy(audio).float()
+            spec   = torch.stft(wave, n_fft=cfg.get("n_fft", 512),
+                                hop_length=cfg.get("hop_length", 160),
+                                return_complex=True)
+            features = spec.abs().numpy()
+            target_w = self.input_shape[2] if len(self.input_shape) == 3 else 87
+            if features.shape[1] < target_w:
+                features = np.pad(features, ((0,0),(0, target_w - features.shape[1])))
+            else:
+                features = features[:, :target_w]
+            tensor = torch.from_numpy(features).float().unsqueeze(0).unsqueeze(0)
+
+        else:
+            raise ValueError(f"Unknown feature_type '{ft}' for task '{self.task_name}'")
+
+        return tensor
 
     def predict(self, audio: np.ndarray) -> dict:
         import torch
 
         if audio.ndim > 1:
             audio = audio.mean(axis=1)
-        tensor = torch.from_numpy(audio).float().unsqueeze(0)
-
+     
+        tensor = self._extract_features(audio)
+        
         with torch.no_grad():
             out = self.model(tensor)
 
@@ -275,7 +327,8 @@ class ModelStore:
             task = obj.object_name.split("/")[0]
             try:
                 data   = client.get_object(MINIO_BUCKET, obj.object_name).read()
-                loaded = torch.load(io.BytesIO(data), map_location="cpu")
+                loaded = torch.load(io.BytesIO(data), map_location="cpu", weights_only=False)
+
                 model  = _reconstruct_model(loaded, task)
                 model.eval()
                 self._models[task] = ModelWrapper(model, task)
@@ -291,7 +344,8 @@ class ModelStore:
             task = os.path.splitext(os.path.basename(path))[0]
             task = task.replace("_best", "").replace("_model", "").replace("best", "")
             try:
-                loaded = torch.load(path, map_location="cpu")
+                loaded = torch.load(path, map_location="cpu", weights_only=False)
+
                 model  = _reconstruct_model(loaded, task)
                 model.eval()
                 self._models[task] = ModelWrapper(model, task)
@@ -724,3 +778,34 @@ async def all_events():
 
     return StreamingResponse(gen(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+    
+@app.post("/simulation/start")
+async def start_simulation():
+    """Register all stadium streams for inference."""
+    streams_to_add = [
+        ("stadium_north", "rtsp://mediamtx:8554/stadium_north"),
+        ("stadium_south", "rtsp://mediamtx:8554/stadium_south"),
+        ("stadium_east",  "rtsp://mediamtx:8554/stadium_east"),
+        ("stadium_west",  "rtsp://mediamtx:8554/stadium_west"),
+    ]
+    results = {}
+    for sid, url in streams_to_add:
+        if sid not in streams:
+            await _add_stream(sid, url)
+            results[sid] = "started"
+        else:
+            results[sid] = "already running"
+    return {"status": "ok", "streams": results}
+
+@app.post("/simulation/stop")
+async def stop_simulation():
+    """Remove all stadium streams."""
+    removed = []
+    for sid in ["stadium_north", "stadium_south", "stadium_east", "stadium_west"]:
+        if sid in streams:
+            handle = streams.pop(sid)
+            handle.active = False
+            if handle.task:
+                handle.task.cancel()
+            removed.append(sid)
+    return {"status": "ok", "removed": removed}

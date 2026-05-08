@@ -1,75 +1,48 @@
-###############################################
-# MediaMTX configuration for Audio-Ops
-# Accepts RTSP audio pushes and relays them
-# Inference engine pulls via RTSP
-###############################################
-
-# Log level
 logLevel: info
 logDestinations: [stdout]
 
-# API (for stream management, health checks)
 api: yes
 apiAddress: :9997
 
-# Metrics for Prometheus scraping (optional)
 metrics: yes
 metricsAddress: :9998
 
-# RTSP server
 rtsp: yes
 rtspAddress: :8554
-# Allow both TCP and UDP transport
-rtspTransports: [tcp, udp]
 
-# RTMP server (for OBS or other sources pushing RTMP)
-rtmp: yes
-rtmpAddress: :1935
-
-# HLS server (browser-accessible playback)
 hls: yes
+hlsVariant: fmp4
 hlsAddress: :8888
 hlsAlwaysRemux: yes
-hlsVariant: lowLatency
 hlsSegmentCount: 3
-hlsSegmentDuration: 500ms
-hlsPartDuration: 100ms
+hlsSegmentDuration: 1s
+hlsAllowOrigin: '*'
 
-# WebRTC (browser playback without plugin)
 webrtc: yes
 webrtcAddress: :8889
 
-# Path configs — each RTSP path becomes a stream slot
+# This allows your Grafana dashboard to talk to it
+webrtcAllowOrigin: "*"
+
 paths:
   all:
-    source: publisher
+    sourceProtocol: udp
 
   microphone:
     source: publisher
 
-  file_stream:
-    source: publisher
-
-  room_1:
-      runOnInit: ffmpeg -re -stream_loop -1 -i /test_audio/demo_negative_fakeaction.wav -c:a libopus -b:a 32k -ar 16000 -ac 1 -f rtsp rtsp://localhost:8554/room_1
-      runOnInitRestart: yes
-
-  room_2:
-    runOnInit: ffmpeg -re -stream_loop -1 -i /test_audio/demo_football_sound.wav -c:a libopus -b:a 32k -ar 16000 -ac 1 -f rtsp rtsp://localhost:8554/room_2
+  stadium_north:
+    runOnInit: ffmpeg -re -stream_loop -1 -i /test_audio/demo_football_sound.wav -c:a libopus -b:a 32k -ar 48000 -ac 1 -f rtsp rtsp://localhost:8554/stadium_north
     runOnInitRestart: yes
 
-  room_3:
-    runOnInit: ffmpeg -re -stream_loop -1 -i /test_audio/test_ronaldo.mp3 -c:a libopus -b:a 32k -ar 16000 -ac 1 -f rtsp rtsp://localhost:8554/room_3
+  stadium_south:
+    runOnInit: ffmpeg -re -stream_loop -1 -i /test_audio/cheering_stadium_crowd.wav -c:a libopus -b:a 32k -ar 48000 -ac 1 -f rtsp rtsp://localhost:8554/stadium_south
     runOnInitRestart: yes
 
-  room_4:
-    runOnInit: ffmpeg -re -stream_loop -1 -i /test_audio/english_test.wav -c:a libopus -b:a 32k -ar 16000 -ac 1 -f rtsp rtsp://localhost:8554/room_4
+  stadium_east:
+    runOnInit: ffmpeg -re -stream_loop -1 -i /test_audio/angry_stadium_crowd.wav -c:a libopus -b:a 32k -ar 48000 -ac 1 -f rtsp rtsp://localhost:8554/stadium_east
     runOnInitRestart: yes
 
-  test_tone:
-    runOnInit: >
-      ffmpeg -re -f lavfi
-      -i "sine=frequency=440:sample_rate=16000"
-      -c:a libopus -b:a 32k -ar 16000 -ac 1
-      -f rtsp rtsp://localhost:8554/test_tone
+  stadium_west:
+    runOnInit: ffmpeg -re -stream_loop -1 -i /test_audio/demo_football_sound2.wav -c:a libopus -b:a 32k -ar 48000 -ac 1 -f rtsp rtsp://localhost:8554/stadium_west
     runOnInitRestart: yes

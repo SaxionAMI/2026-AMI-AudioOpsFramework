@@ -495,6 +495,14 @@ class ModelTrainer:
             "val_acc":            val_acc,
             "mlflow_run_id":      run_id,
             "saved_at":           time.time(),
+            "feature_config": {                          # ← ADD THIS
+                "feature_type": self.cfg.feature_type,       # from task config
+                "sample_rate": self.cfg.sample_rate,
+                "n_mels": 128,
+                "n_fft": 512,
+                "hop_length": 160,
+                "clip_duration_s": self.cfg.clip_duration_s,
+            },
         }
 
         torch.save(checkpoint, path)
