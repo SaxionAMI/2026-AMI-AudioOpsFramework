@@ -79,3 +79,15 @@ models/
 Dockerfile*
 docker-compose*.yml
 .dockerignore
+# Runtime artifacts & caches (added by cleanup)
+storage/
+dagster_home/
+mlruns/
+models/
+audio_input/
+.pytest_cache/
+.mypy_cache/
+mlruns
+tests/
+dist/
+*.zip

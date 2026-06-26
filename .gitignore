@@ -172,3 +172,15 @@ backups/
 .pytest_cache/
 dist/
 build/
+
+# ── Framework runtime artifacts (added by cleanup) ──
+storage/
+dagster_home/
+mlruns/
+models/
+audio_input/
+*.pt
+.env
+.secrets.env
+__pycache__/
+*.pyc

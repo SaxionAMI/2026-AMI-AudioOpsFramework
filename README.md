@@ -1,342 +1,429 @@
-# AMI Audio Ops Framework
+# Audio Ops Framework
 
-A modular, task-pluggable audio ML platform. Drop in audio files, register a task, and get a fully orchestrated train → evaluate → serve pipeline — tracked in MLflow, stored in MinIO, visualized in Grafana.
+A framework for building **audio machine-learning pipelines** — feature
+extraction, training, evaluation, and real-time inference — that you can reuse
+across very different projects (stadium analytics, medical audio, call triage,
+wake-word, …) by writing small **tasks** instead of rebuilding plumbing.
 
----
-
-## Architecture
-
-```
-┌────────────────────────────────────────────────────────────────┐
-│                        Your Audio Files                        │
-│                    audio_input/<task>/*.wav                     │
-└────────────────────────┬───────────────────────────────────────┘
-                         │
-                         ▼
-┌────────────────────────────────────────────────────────────────┐
-│                   Dagster  (port 3000)                         │
-│                                                                │
-│   raw_audio_files                                              │
-│        │  glob .wav from input_dir                             │
-│        ▼                                                       │
-│   segmented_features                                           │
-│        │  librosa → mel-spectrogram segments → .npy            │
-│        ▼                                                       │
-│   dataset_splits                                               │
-│        │  group-aware stratified train/val/test CSVs           │
-│        ▼                                                       │
-│   trained_model  ──────────────────────────► MLflow (5000)     │
-│        │  task.build_model() + ModelTrainer   experiments,     │
-│        ▼                                      checkpoints      │
-│   model_evaluation                                             │
-│        │  test set metrics logged to MLflow                    │
-│        ▼                                                       │
-│    storage/<task>/checkpoints/best_model.pt                    │
-└────────────────────────────────────────────────────────────────┘
-                         │
-                    checkpoint
-                         │
-                         ▼
-┌────────────────────────────────────────────────────────────────┐
-│                 Inference Service (port 8000)                  │
-│             FastAPI / uvicorn — loads from storage/            │
-└────────────────────────────────────────────────────────────────┘
-
-Supporting Services
-───────────────────
-MinIO   (9000/9001)  S3-compatible artifact & feature storage
-InfluxDB    (8086)   Time-series audio and system metrics
-Grafana     (3001)   Dashboards wired to InfluxDB
-Label Studio(8080)   Audio annotation and labeling
-```
+Dagster is the orchestration core. A task declares *what it is* and *what it can
+do*; the framework assembles exactly the pipeline that task needs and nothing
+more. It runs out of the box with no external services — object storage,
+metrics, dashboards, and LLM features are optional and added only when a project
+wants them.
 
 ---
 
-## Services at a Glance
-
-| Service       | Port(s)    | Purpose                              |
-|---------------|------------|--------------------------------------|
-| Dagster UI    | 3000       | Pipeline orchestration & scheduling  |
-| MLflow        | 5000       | Experiment tracking, model registry  |
-| Inference API | 8000       | FastAPI model serving endpoint       |
-| MinIO API     | 9000       | S3-compatible object storage         |
-| MinIO Console | 9001       | MinIO web UI                         |
-| InfluxDB      | 8086       | Time-series metrics database         |
-| Grafana       | 3001       | Dashboards                           |
-| Label Studio  | 8080       | Audio data labeling                  |
+## Table of contents
+1. [The mental model](#1-the-mental-model)
+2. [Architecture](#2-architecture)
+3. [The capability system (the core logic)](#3-the-capability-system-the-core-logic)
+4. [The training data flow](#4-the-training-data-flow)
+5. [The inference / serving path](#5-the-inference--serving-path)
+6. [Storage model](#6-storage-model)
+7. [Anatomy of a task](#7-anatomy-of-a-task)
+8. [Quickstart](#8-quickstart)
+9. [Configuration reference](#9-configuration-reference)
+10. [Optional integrations](#10-optional-integrations)
+11. [Project layout](#11-project-layout)
+12. [Further improvements](#12-further-improvements)
 
 ---
 
-## How It Works
+## 1. The mental model
 
-### The Task Plugin System
+Three ideas carry the whole framework:
 
-Each audio task lives in its own folder under `audio_ops_dagster/tasks/`. Adding a new task requires two files:
+**Tasks, not pipelines.** You never edit the pipeline. You write a *task* — a
+model plus four methods (build / loss / metrics / postprocess) and a
+`config.yaml`. Auto-discovery finds it; the framework builds its pipeline.
+
+**Capabilities, not flags.** A task declares what it can do —
+`train`, `evaluate`, `batch_infer`, `serve` — and the builder *adds* exactly
+those stages. A serve-only model contributes zero Dagster assets; a
+training-only project never starts the API. One framework, many shapes.
+
+**Two meanings of "inference," kept separate.** Offline scoring of a dataset is
+a Dagster asset (`batch_infer`). The long-running RTSP/WebSocket/SSE service is
+a daemon (`serve`). They never get tangled.
+
+---
+
+## 2. Architecture
 
 ```
-audio_ops_dagster/tasks/
-└── my_task/
-    ├── config.yaml       ← task parameters (loaded by definitions.py)
-    └── task_my_task.py   ← @register_task class implementing AudioTask
+                       ┌──────────────────────────────────────────┐
+                       │            tasks/<name>/                  │
+                       │  config.yaml  +  task_<name>.py           │
+                       │  (declares capabilities + the model)      │
+                       └───────────────┬──────────────────────────┘
+                      auto-discovery (registry.py)
+                                       │
+            ┌──────────────────────────┴───────────────────────────┐
+            ▼                                                        ▼
+   ┌───────────────────┐                                  ┌────────────────────┐
+   │  DAGSTER (core)   │                                  │  INFERENCE API     │
+   │  definitions.py   │  reads capabilities              │  (FastAPI)         │
+   │  builds per task: │                                  │  serves tasks with │
+   │   raw → features  │                                  │  the `serve` cap   │
+   │   → splits        │   train/evaluate/batch_infer     │  • file upload     │
+   │   → trained_model │                                  │  • RTSP pull       │
+   │   → evaluation    │                                  │  • WS mic ingest   │
+   │   → inference     │                                  │  • SSE out + fusion│
+   └─────────┬─────────┘                                  └─────────┬──────────┘
+             │ checkpoints / features / outputs                     │ loads checkpoints
+             ▼                                                      ▼
+   ┌──────────────────────────────────────────────────────────────────────────┐
+   │  STORAGE: local filesystem by default (./storage),                        │
+   │           or S3/MinIO when STORAGE_BACKEND=minio                          │
+   └──────────────────────────────────────────────────────────────────────────┘
+
+   Optional, off by default: InfluxDB metrics · MLflow server · LLM · MediaMTX
 ```
 
-`definitions.py` auto-discovers every task folder that has a `config.yaml`, creates a typed `AudioTaskResource` from it, and generates the full 5-asset DAG plus two named jobs (`<task>_full_training_job`, `<task>_data_prep_job`) — all without touching any other file.
+The two runtimes share one thing only: the **task contract** (registry +
+`config.yaml` + the on-disk artifact layout). Dagster trains and writes
+checkpoints; the API reads them. Neither imports the other's internals.
 
-### Task Registration
+---
 
-```python
-# audio_ops_dagster/tasks/my_task/task_my_task.py
+## 3. The capability system (the core logic)
 
-from audio_ops_dagster.core.base_task import AudioTask
-from audio_ops_dagster.registry import register_task
+Every task resolves to a set of capabilities (`capabilities.py`):
 
-@register_task("my_task")
-class MyTask(AudioTask):
-    def build_model(self, input_shape):
-        # Return a nn.Module
-        ...
+| Capability    | Meaning                                  | Dagster assets built                                   |
+|---------------|------------------------------------------|--------------------------------------------------------|
+| `train`       | produces a checkpoint                    | raw_audio → features → splits → **trained_model**      |
+| `evaluate`    | scores a held-out split                  | …above… → **model_evaluation**                         |
+| `batch_infer` | offline scoring of a dataset             | raw_audio → features → **inference_results**           |
+| `serve`       | online serving via the API               | *(none — handled by the inference daemon)*             |
 
-    def compute_metrics(self, y_true, y_pred):
-        # Return {"accuracy": 0.95, ...}
-        ...
-
-    def postprocess(self, raw_output):
-        # Format model output for the API
-        ...
-```
-
-### Task Configuration (`config.yaml`)
-
-Every field maps directly to `TaskConfig` in `registry.py`. Only the fields relevant to your task are required.
+**Archetypes** are named bundles so configs read as intent:
 
 ```yaml
-# tasks/my_task/config.yaml
-feature_type: spectrogram       # spectrogram | mfcc | raw
-input_dir: "audio_input/my_task/data"
-split_strategy: "group"         # group | random
-num_classes: 4
-class_labels:
-  - class_a
-  - class_b
-  - class_c
-  - class_d
-model_architecture: resnet18
-batch_size: 32
-epochs: 20
-learning_rate: 0.0005
-optimizer: adam
-criterion: cross_entropy
+archetype: trainable_model        # train + evaluate + batch_infer + serve
+archetype: pretrained_servable    # serve only
+archetype: pretrained_batch       # batch_infer only
+archetype: eval_only              # evaluate only
 ```
 
-### Audio Processing Pipeline
+**Resolution order** (in `resolve_capabilities`): an explicit `capabilities:`
+list wins; otherwise an `archetype:`; otherwise a legacy
+`dagster.training_enabled` flag (back-compat) — defaulting to a full
+`trainable_model`.
 
-`AudioProcessor` handles the raw-audio → feature transformation:
+**How assembly works.** `definitions.py` loops over `tasks/`, resolves each
+task's capabilities, and:
+- registers the task's resource (always),
+- calls `build_audio_assets(task, resource_key, caps)` — which returns only the
+  assets the capabilities require, resolving prerequisites (e.g. `evaluate`
+  pulls in `splits` and `trained_model`),
+- calls `build_audio_jobs(task, caps)` — which only emits a job when its assets
+  exist (no "full training job" for a serve-only task).
 
-1. Loads `.wav` (and `.mp3`) files with `librosa` at 16 kHz
-2. Slices each file into fixed-length segments (default 1 s, 25% overlap)
-3. Extracts features per segment:
-   - `spectrogram` → 128-bin mel-spectrogram, log-scaled, normalized to `[0, 1]`
-   - `mfcc` → (extend `_extract` to add this)
-   - `raw` → raw waveform array
-4. Saves each segment as a `.npy` file under `storage/<task>/features/<label>/`
-
-The **label** for each segment is inferred from its parent folder name — matching the standard audio classification layout:
-
-```
-audio_input/sentiment/
-├── approval/
-│   ├── file1.wav
-│   └── file2.wav
-├── disapproval/
-│   └── file3.wav
-└── neutral/
-    └── file4.wav
-```
-
-### Dataset Splitting
-
-`AudioDataset.create_splits_csv` produces train/val/test CSVs. Two strategies are supported:
-
-- **`group`** (recommended for segmented audio): Splits by *source file* so segments from the same recording can't appear in both train and test. Uses stratified sampling to maintain class balance.
-- **`random`**: Stratified random split by segment. Faster but risks data leakage from over-segmented recordings.
-
-The group ID is parsed by splitting on `_seg` or `_chunk` in the filename, e.g. `speaker01_seg_003.npy` → group `speaker01`.
-
-### Training & MLflow Logging
-
-`ModelTrainer.train()` runs the standard PyTorch training loop and logs everything to MLflow:
-
-- **Params**: all `TaskConfig` fields logged at run start
-- **Metrics**: `train_loss` and `val_loss` per epoch; task-specific metrics (accuracy, F1, WER, etc.) per epoch
-- **Artifacts**: best checkpoint `.pt` file, plus the full model via `mlflow.pytorch.log_model()`
-- **Model Registry**: model is registered under `<TaskClass>_Model`
-
-Run names are auto-generated: `SENTIMENT_resnet18_spectrogram_lr0.001_bs32_143022`
+A serve-only task passes `produces_dagster_assets(caps) == False` and is skipped
+entirely in Dagster — it exists only for the API to load. That single branch is
+why a medical transcription project deploys *only* the API, while a stadium
+classifier project deploys the full training stack.
 
 ---
 
-## Adding a New Task — Checklist
+## 4. The training data flow
 
-1. Create `audio_ops_dagster/tasks/<your_task>/`
-2. Add `__init__.py` (empty is fine)
-3. Add `config.yaml` with at least `feature_type`, `num_classes`, and `class_labels`
-4. Add `task_<your_task>.py` with `@register_task("<your_task>")` on your `AudioTask` subclass
-5. Put your audio files in `audio_input/<your_task>/`
-6. Restart Dagster — your assets and jobs appear automatically
+For a task with `train`/`evaluate`, the assets run in this order (`assets.py`):
+
+1. **raw_audio_files** — scans `input_dir/` for `.wav`/`.mp3`. Convention: audio
+   lives under `input_dir/<label>/…`, so the folder name is the class label.
+2. **segmented_features** — `AudioProcessor` slices each file into fixed windows
+   (default 1 s) and writes one `.npy` log-mel spectrogram per segment to
+   `output_dir/features/<label>/<recording>_seg_NNN.npy`.
+3. **dataset_splits** — `AudioDataset.create_splits_csv` scans those features and
+   writes `train/val/test.csv`. The **group** strategy groups segments by source
+   recording (everything before `_seg`/`_chunk`) and does a *stratified* split on
+   the groups, so segments from one clip never leak across splits and class
+   balance is preserved. (Use `split_strategy: group` whenever segments are
+   correlated; `random` otherwise.)
+4. **trained_model** — builds the task's model, trains with `ModelTrainer`
+   (MLflow-logged), writes `output_dir/checkpoints/best_model.pt`.
+5. **model_evaluation** — loads the checkpoint, scores `test.csv` via the task's
+   `compute_metrics`.
+6. **inference_results** (`batch_infer`) — runs the model over all features and
+   writes results JSON (and time-series points if metrics are enabled).
+   Classifier and transcription paths differ: transcription concatenates
+   segments into larger chunks for efficiency.
+
+Every step optionally syncs its artifact to object storage **only if** the task
+sets `use_remote_storage: true` *and* a storage backend is enabled — otherwise
+everything stays on local disk.
 
 ---
 
-## Included Task: Sentiment
+### Running inference on a new batch (no scripts, stays in Dagster)
 
-Classifies crowd/speaker audio into **approval / disapproval / neutral**.
+"Score this folder of audio with a trained task" is just the task's
+`<task>_inference_job` — the `batch_infer` sub-graph (`raw_audio → features →
+inference_results`), no training, no daemon. To point it at arbitrary data,
+launch the job and set the run config **once** on the root asset:
 
-- **Model**: ResNet18 (pretrained ImageNet), first conv adapted for single-channel mel-spectrogram input, custom classifier head with dropout
-- **Input**: Mel-spectrogram segments (128 × ~87 time steps at 1 s / 16 kHz)
-- **Metrics**: weighted accuracy and F1
-
-Config: `tasks/sentiment/config.yaml`
-
----
-
-## Project Structure
-
-```
-.
-├── audio_ops_dagster/              Dagster orchestration service
-│   ├── Dockerfile.dagster
-│   ├── dagster_pyproject.toml      Full ML stack deps (torch, mlflow, etc.)
-│   ├── definitions.py              Auto-discovers tasks, builds Definitions
-│   ├── registry.py                 @register_task decorator + TaskConfig
-│   ├── assets.py                   5-asset DAG factory (build_audio_assets)
-│   ├── jobs.py                     Job factory (full_training, data_prep)
-│   ├── core/
-│   │   ├── base_task.py            AudioTask ABC
-│   │   ├── audio_processor.py      Segmentation + feature extraction
-│   │   ├── audio_dataset.py        PyTorch Dataset + CSV split logic
-│   │   └── model_trainer.py        Train loop + MLflow integration
-│   └── tasks/
-│       ├── sentiment/
-│       │   ├── config.yaml
-│       │   └── task_sentiment.py
-│       └── speech_to_text/         Stub — ready to implement
-│           ├── config.yaml
-│           └── model.py
-│
-├── audio-ops-inference/            FastAPI inference service
-│   ├── Dockerfile.inference
-│   └── inference_pyproject.toml   Minimal serving deps only
-│
-├── mlflow/
-│   └── Dockerfile.mlflow
-│
-├── config/
-│   ├── config.yaml                 Main typed config (all services)
-│   ├── config_minio.yaml
-│   ├── config_mlflow.yaml
-│   ├── config_influxdb.yaml
-│   └── config_inference.yaml
-│
-├── config_loader.py               Typed config dataclasses (AudioOpsConfig)
-├── secrets_manager.py             .secrets.env loader with typed getters
-├── docker-compose.yml
-├── workspace.yaml                 Points Dagster at definitions.py
-├── Makefile                       Dev shortcuts
-├── setup.sh                       First-run setup script
-├── pyproject.toml                 Root shared deps (pyyaml, pydantic, etc.)
-│
-├── .env                           Runtime config (ports, hosts, feature flags)
-├── .secrets.env                   Credentials (never commit)
-│
-└── audio_input/                   Mount your audio here (created by setup)
-    └── sentiment/
-        ├── approval/
-        ├── disapproval/
-        └── neutral/
+```yaml
+ops:
+  example_classifier_raw_audio_files:
+    config:
+      input_dir: /data/new_batch          # audio to score
+      output_dir: /data/new_batch_out      # features + results land here
 ```
 
+The override threads through the whole inference path. Results are written to
+`<output_dir>/outputs/` as both JSON and CSV. Leave the config unset for normal
+pipeline runs (it uses the task's configured dirs). The trained checkpoint is
+read from the task's `output_dir/checkpoints` (override with the
+`INFERENCE_CHECKPOINT` env var). Streaming, by contrast, is **not** a job — it's
+the long-running service in §5.
+
+## 5. The inference / serving path
+
+The FastAPI app (`audio_ops_inference/api.py`) is a standalone daemon. On
+startup its `ModelStore`:
+- discovers tasks from `tasks/` and loads any with a servable wrapper
+  (classification, transcription, or a pretrained event model),
+- loads trained checkpoints **local-first** from `MODELS_DIR` (set
+  `STORAGE_BACKEND=minio` to pull from object storage instead).
+
+How a task is served is decided by a **wrapper registry** (`@register_wrapper`)
+keyed on task type — `classifier`, `transcription`, `pretrained_event` ship
+built in, and you add new servable kinds by registering a factory rather than
+editing the API. Classifier serving builds the network from the task's own
+`build_model()` and loads the checkpoint (no architecture-name reconstruction).
+
+It then exposes:
+- **file upload** — score a clip,
+- **RTSP pull** — consume a live stream (MediaMTX provides one for demos),
+- **WebSocket ingest** — push browser/mic PCM frames on a shared media clock,
+- **SSE output** — per-segment results streamed to clients,
+- **fusion** *(optional)* — a project-specific add-on
+  (`audio_ops_dagster/extras/fusion.py`) that merges transcript + event +
+  sentiment tracks onto one timeline. It is **off by default**; enable with
+  `ENABLE_FUSION=true`. Not part of the generic core.
+
+The LLM client and fusion degrade gracefully: if disabled or unavailable, the
+API logs a note and serves everything else.
+
 ---
 
-## Configuration System
+## 6. Storage model
 
-Config loads in priority order: **environment variables → `config/config.yaml` → dataclass defaults**.
+One taxonomy (`core/storage.py` → `ArtifactType`): `audio`, `features`,
+`dataset`, `models`, `outputs`. Keys are `{task}/{artifact_type}/{file}`.
+
+- **Default — local filesystem.** `MinIOStorageResource` is disabled; all
+  artifacts live under `./storage/<task>/…`. No service required.
+- **Opt-in — S3/MinIO** via the boto3-based `S3StorageBackend` (works with
+  MinIO, AWS S3, R2, B2). Enable with `STORAGE_BACKEND=minio` + `MINIO_*`. Uploads
+  still only happen for tasks with `use_remote_storage: true`.
+
+---
+
+## 7. Anatomy of a task
+
+A task is a folder under `audio_ops_dagster/tasks/`:
+
+```
+tasks/example_classifier/
+  __init__.py
+  config.yaml                 # capabilities + data + hyperparameters
+  task_example_classifier.py  # the model + 4 methods
+```
+
+The class subclasses `AudioTask` and implements:
 
 ```python
-from config_loader import get_config
-config = get_config()              # Singleton; loads YAML then falls back to env
-
-from secrets_manager import get_secrets_manager
-secrets = get_secrets_manager()    # Loads .secrets.env
-creds = secrets.get_minio_credentials()
+@register_task("example_classifier")
+class ExampleClassifierTask(AudioTask):
+    TASK_TYPE = "classification"          # or "transcription" / "detection"
+    def build_model(self, input_shape): ...      # return an nn.Module
+    def compute_loss(self, model, batch, device): ...
+    def compute_metrics(self, y_true, y_pred): ...  # {"accuracy": ...}
+    def postprocess(self, raw_output): ...       # logits -> friendly dict
 ```
 
-The `AudioOpsConfig` dataclass covers all services (Dagster, MLflow, MinIO, InfluxDB, Inference, Label Studio, Grafana, Storage, Logging, Security) and can be exported/imported as YAML or JSON.
+Optional hooks: `format_influx_record` (time-series schema),
+`grafana_panel_hints`, `postprocess_with_llm`. See
+`tasks/example_classifier/` for the complete reference.
 
-### Environment Files
+`TASK_TYPE` (`classification` | `regression` | `detection` | `transcription`)
+tells the framework how to split labels and which serve wrapper to use.
+`feature_type` selects a feature extractor from the registry (see
+[Extending](#extending-the-framework)).
 
-| File | Purpose | Commit? |
-|------|---------|---------|
-| `.env` | Ports, hostnames, feature flags, non-secret settings | No |
-| `.secrets.env` | Passwords, tokens, API keys | **Never** |
-| `config/config.yaml` | Typed service config (mirrors .env but as YAML) | Yes (no secrets) |
+Create any of them with the scaffolder:
+
+```bash
+python scripts/new_task.py wake_word                          # classification
+python scripts/new_task.py loudness    --type regression
+python scripts/new_task.py tagging     --type detection --feature mfcc
+python scripts/new_task.py transcriber --type transcription   # serve-only
+```
 
 ---
 
-## GPU Support
-
-Both `dagster` and `dagster-daemon` include an NVIDIA GPU reservation in `docker-compose.yml`. The `AudioTask` base class and `ModelTrainer` both call `torch.cuda.is_available()` at runtime — no code changes needed to run on CPU instead.
-
-To disable GPU reservation (CPU-only), remove or comment the `deploy.resources` block from the dagster services in `docker-compose.yml`.
-
----
-
-## Development Workflow
+## 8. Quickstart
 
 ```bash
-make setup        # First time: create dirs + copy config templates
-make validate     # Check .env and required vars are set
-make up           # docker-compose up -d
-make health       # Curl all service health endpoints
-make logs         # Follow all service logs
-make logs-dagster # Dagster only
-make shell-dagster # bash into the dagster container
+make setup                      # runtime dirs + .env
+# audio_input/example_classifier/<label>/*.wav   (folder name = label)
 
-make backup       # tar.gz snapshot of all data dirs
-make clean        # docker-compose down
-make clean-all    # down + remove volumes (destructive)
-```
-
-### Running Locally Without Docker
-
-```bash
-# Install dagster service deps
-cd audio_ops_dagster
+# Local:
 poetry install
+dagster dev                     # http://localhost:3000  → materialize the task
 
-# Set env
-export DAGSTER_HOME=$(pwd)/../dagster_home
-export MLFLOW_TRACKING_URI=http://localhost:5000
+# Docker — core (Dagster) only:
+docker compose up -d
 
-# Launch
-dagster-webserver -w ../workspace.yaml
+# Docker — core + streaming inference (:8000) + media server:
+docker compose -f docker-compose.yml -f docker-compose.inference.yml up -d
+```
+
+Training output lands in `storage/example_classifier/`; the API auto-loads the
+checkpoint.
+
+---
+
+## 9. Configuration reference
+
+Key `config.yaml` fields (per task):
+
+| Field                | Purpose                                                        |
+|----------------------|----------------------------------------------------------------|
+| `archetype` / `capabilities` | what the task contributes (see §3)                     |
+| `task_name`          | unique id; matches `@register_task` and the folder name        |
+| `input_dir`          | where labelled audio lives (`<input_dir>/<label>/*.wav`)       |
+| `output_dir`         | where features/splits/checkpoints/outputs are written          |
+| `feature_type`       | extractor name: `spectrogram`/`mel`/`logmel`/`mfcc`/`raw`/custom |
+| `task_type`          | `classification`/`regression`/`detection`/`transcription`       |
+| `serve_wrapper`      | (optional) override the serving wrapper explicitly             |
+| `input_shape`        | model input shape, e.g. `[1, 128, 87]`                         |
+| `num_classes` / `class_labels` | classification head + label names                    |
+| `split_strategy`     | `group` (leak-safe, stratified) or `random`                    |
+| `batch_size` / `epochs` / `learning_rate` / `optimizer` / `criterion` | training |
+| `use_remote_storage` | sync artifacts to object storage (needs a backend enabled)     |
+
+For ad-hoc batch scoring, `input_dir`/`output_dir` can also be overridden at
+launch time via the inference job's run config (see §4) instead of editing the
+config file.
+
+---
+
+## 10. Optional integrations
+
+All env-driven (`env.example`, `MIGRATION.md`); each is omitted by default and
+the code runs without it:
+
+- **Object storage** — `STORAGE_BACKEND=minio` + `MINIO_*`.
+- **Metrics (InfluxDB)** — `ENABLE_INFLUXDB=true` + `INFLUXDB_*`; writes are
+  no-ops otherwise (no dashboards bundled).
+- **Experiment tracking** — `MLFLOW_TRACKING_URI` (defaults to local `./mlruns`).
+- **LLM** — `ENABLE_LLM=true` + `LLM_*` (any OpenAI-compatible endpoint).
+- **Fusion** (transcript+event+sentiment timeline) — `ENABLE_FUSION=true`; an
+  optional add-on in `extras/`, not core.
+
+---
+
+## 11. Project layout
+
+```
+audio_ops_dagster/
+  capabilities.py            capability model + archetypes + resolver
+  registry.py                @register_task + auto-discovery
+  definitions.py             Dagster entry point (capability-driven assembly)
+  assets.py                  the 6 per-task assets
+  jobs.py                    per-task jobs (gated by capability)
+  core/
+    base_task.py             AudioTask abstract base (the task contract)
+    features.py              pluggable feature-extractor registry
+    audio_processor.py       segments audio, runs the chosen extractor
+    audio_dataset.py         CSV+npy dataset + stratified group splits
+    task_config_schema.py    config validation (clear early errors)
+    metrics.py               metrics sink façade (+ NullMetricsResource)
+    model_trainer.py         training loop (MLflow, early stopping, AMP)
+    storage.py               S3StorageBackend + ArtifactType
+    storage_resource.py      Dagster resource wrapping storage (local-first)
+    influxdb_resource.py     metrics resource (no-op unless enabled)
+    llm_client.py            optional generic LLM client
+  streaming/                 RTSP sensor + stream engine
+  monitoring/                influx writer helpers
+  extras/                    OPTIONAL add-ons (not imported by default)
+    fusion.py                transcript/event/sentiment timeline (ENABLE_FUSION)
+  tasks/example_classifier/  the reference task
+audio_ops_inference/         the serving daemon (importable package)
+scripts/new_task.py          task scaffolder
+mediamtx/                    media server config
+tests/                       pytest suite (capabilities, splits, config, features)
+docker-compose.yml           CORE: Dagster (training + batch inference)
+docker-compose.inference.yml STREAMING inference service + media server
+docker-compose.gpu.yml       GPU overlay (apply on top of either)
+project-template/            copy this to start a thin project repo
+PACKAGING.md                 use the framework as a package (thin project repos)
+MIGRATION.md                 what's omitted + how to re-enable
+IMPROVEMENTS.md              known limitations + roadmap
 ```
 
 ---
 
-## Makefile Reference
+## Deployment: two units, one repo
 
-| Command | Description |
-|---------|-------------|
-| `make setup` | Create dirs, copy .env and .secrets.env from examples |
-| `make validate` | Check config files and required vars |
-| `make up` / `make down` | Start / stop all services |
-| `make restart` | down + up |
-| `make rebuild` | `--no-cache` Docker build |
-| `make health` | Curl all endpoints |
-| `make logs` | All logs |
-| `make logs-<service>` | Single service logs |
-| `make shell-<service>` | Interactive bash in container |
-| `make backup` | Archive data directories |
-| `make export-config` | Dump config to `config/config-export.yaml` |
-| `make clean` | Remove containers |
-| `make clean-volumes` | Remove containers + volumes |
-| `make clean-all` | Remove everything (requires confirmation) |
+Training and streaming inference have different operational profiles, so they're
+separate **deployables** (not separate repos):
+
+- **Core (Dagster)** — `docker-compose.yml`. Bursty, GPU-when-a-job-runs,
+  scale-to-zero fine, lives near your data. Runs training, evaluation, and
+  **batch inference** (the `<task>_inference_job`).
+- **Streaming inference** — `docker-compose.inference.yml`. Long-running,
+  latency-bound, scaled horizontally behind a load balancer, lives near your
+  media ingress. Holds models in memory; reads checkpoints from shared storage
+  or object storage.
+
+```bash
+docker compose up -d                                   # core only
+docker compose -f docker-compose.inference.yml up -d   # streaming only (own host/env)
+docker compose -f docker-compose.yml \
+               -f docker-compose.inference.yml up -d    # both together
+# add  -f docker-compose.gpu.yml  for an NVIDIA runtime
+```
+
+They share only the task contract and the artifact layout — so the same image
+set deploys to two environments with independent GPU/scaling configs, without
+the cost of keeping two repos in sync.
+
+**Separate project repos.** The framework is an installable package, so each
+project (e.g. one for training, one for serving) can be its own thin repo that
+depends on it and brings only its own tasks. See **[`PACKAGING.md`](PACKAGING.md)**
+and `project-template/`.
+
+---
+
+## Extending the framework
+
+Three registries make new behavior plug-in, not fork:
+
+- **Tasks** — `@register_task("name")` on an `AudioTask` subclass. Auto-discovered.
+- **Feature extractors** — `@register_feature("name")` on a
+  `(waveform, sample_rate) -> np.ndarray` callable. Select it with `feature_type:`.
+- **Serve wrappers** — `@register_wrapper("type")` on a
+  `(task, task_name, cfg) -> wrapper` factory, for new servable model kinds.
+
+Plus a pluggable **metrics sink**: subclass `NullMetricsResource` and wire it in
+`definitions.py`. Each is declared in your own task module — you never edit core.
+
+Config is validated at build time, so a typo'd capability, a label/`num_classes`
+mismatch, or an unknown feature surfaces immediately with a clear message.
+
+Run the tests with `make test`.
+
+---
+
+## 12. Further improvements
+
+See **[`IMPROVEMENTS.md`](IMPROVEMENTS.md)** for a prioritized list of known
+limitations and suggested next steps (label-index consistency across splits,
+unifying the two S3 clients, the model-reconstruction coupling in the API, a
+config schema validator, and tests). None block normal use; they're the honest
+rough edges worth addressing as the framework grows.

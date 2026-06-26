@@ -6,11 +6,10 @@ Supports:
   • vLLM    (high-throughput production serving)
   • OpenAI-compatible APIs  (LocalAI, LiteLLM, text-generation-inference)
 
-The client is used by tasks' postprocess_with_llm() for:
-  • Fixing transcription errors and adding punctuation (STT)
-  • Interpreting non-verbal events in clinical context
-  • Answering questions about what was said
-  • Synthesizing multi-task outputs (sentiment + STT + nonverbal → summary)
+Generic OpenAI-compatible chat/completion client. The framework does not
+require it; tasks may use it from their optional postprocess_with_llm() hook
+(e.g. to refine, explain, or summarize a prediction). It is enabled only when
+ENABLE_LLM=true.
 
 Usage
 -----

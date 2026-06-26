@@ -1,3 +1,14 @@
+###############################################################################
+# MediaMTX — Audio Ops
+# Changes vs the original:
+#   * Lower-latency HLS (Low-Latency variant, shorter parts) so the legacy
+#     "Server file" listen path drifts far less from the inference events.
+#   * A documented "microphone" publish path. With the v4 console you usually
+#     push mic audio straight to the inference WebSocket (no MediaMTX needed),
+#     but this path stays useful if you want the browser → WHIP → RTSP route
+#     so OTHER consumers can also subscribe to the mic.
+###############################################################################
+
 logLevel: info
 logDestinations: [stdout]
 
@@ -10,39 +21,58 @@ metricsAddress: :9998
 rtsp: yes
 rtspAddress: :8554
 
+# ── HLS: switch to Low-Latency to cut the listen-vs-events drift ──────────────
 hls: yes
-hlsVariant: fmp4
+hlsVariant: lowLatency          # was: mpegts
 hlsAddress: :8888
 hlsAlwaysRemux: yes
-hlsSegmentCount: 3
+hlsSegmentCount: 7              # LL-HLS wants a few more, shorter segments
 hlsSegmentDuration: 1s
-hlsAllowOrigin: '*'
+hlsPartDuration: 200ms         # parts drive the low-latency delivery
+hlsAllowOrigins: ['*']
 
+# ── WebRTC: lowest-latency listen option AND the mic publish (WHIP) path ──────
 webrtc: yes
 webrtcAddress: :8889
-
-# This allows your Grafana dashboard to talk to it
-webrtcAllowOrigin: "*"
+webrtcAllowOrigins: ['*']
+# For browser mic publishing via WHIP, point a publisher at:
+#   http://<host>:8889/microphone/whip
+# and subscribers can read rtsp://mediamtx:8554/microphone
 
 paths:
   all:
     sourceProtocol: udp
 
+  # Publish target for a browser microphone (WHIP/WebRTC) or any RTSP publisher.
   microphone:
     source: publisher
 
+  triage_call:
+    runOnDemand: >-
+      ffmpeg -re -stream_loop -1 -i /test_audio/long_dutch_consult_doctor.wav
+      -c:a aac -b:a 128k -ar 44100 -ac 1 -f rtsp rtsp://localhost:$RTSP_PORT/$MTX_PATH
+    runOnDemandCloseAfter: 10s
+
   stadium_north:
-    runOnInit: ffmpeg -re -stream_loop -1 -i /test_audio/demo_football_sound.wav -c:a libopus -b:a 32k -ar 48000 -ac 1 -f rtsp rtsp://localhost:8554/stadium_north
-    runOnInitRestart: yes
+    runOnDemand: >-
+      ffmpeg -re -stream_loop -1 -i /test_audio/demo_football_sound.wav
+      -c:a aac -b:a 128k -ar 44100 -ac 1 -f rtsp rtsp://localhost:$RTSP_PORT/$MTX_PATH
+    runOnDemandCloseAfter: 10s
 
   stadium_south:
-    runOnInit: ffmpeg -re -stream_loop -1 -i /test_audio/cheering_stadium_crowd.wav -c:a libopus -b:a 32k -ar 48000 -ac 1 -f rtsp rtsp://localhost:8554/stadium_south
-    runOnInitRestart: yes
+    runOnDemand: >-
+      ffmpeg -re -stream_loop -1 -i /test_audio/cheering_stadium_crowd.wav
+      -c:a aac -b:a 128k -ar 44100 -ac 1 -f rtsp rtsp://localhost:$RTSP_PORT/$MTX_PATH
+    runOnDemandCloseAfter: 10s
 
   stadium_east:
-    runOnInit: ffmpeg -re -stream_loop -1 -i /test_audio/angry_stadium_crowd.wav -c:a libopus -b:a 32k -ar 48000 -ac 1 -f rtsp rtsp://localhost:8554/stadium_east
-    runOnInitRestart: yes
+    runOnDemand: >-
+      ffmpeg -re -stream_loop -1 -i /test_audio/angry_stadium_crowd.wav
+      -c:a aac -b:a 128k -ar 44100 -ac 1 -f rtsp rtsp://localhost:$RTSP_PORT/$MTX_PATH
+    runOnDemandCloseAfter: 10s
 
   stadium_west:
-    runOnInit: ffmpeg -re -stream_loop -1 -i /test_audio/demo_football_sound2.wav -c:a libopus -b:a 32k -ar 48000 -ac 1 -f rtsp rtsp://localhost:8554/stadium_west
-    runOnInitRestart: yes
+    runOnDemand: >-
+      ffmpeg -re -stream_loop -1 -i /test_audio/demo_football_sound2.wav
+      -c:a aac -b:a 128k -ar 44100 -ac 1 -f rtsp rtsp://localhost:$RTSP_PORT/$MTX_PATH
+    runOnDemandCloseAfter: 10s

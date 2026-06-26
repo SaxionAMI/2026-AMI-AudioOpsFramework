@@ -1,0 +1,42 @@
+FROM python:3.10-slim
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg curl libsndfile1 libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# 1. CHANGED: Install PyTorch with CUDA 12 support instead of the CPU wheel
+RUN pip install --no-cache-dir \
+    torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+
+# TensorFlow CPU — pin <2.16 to keep Keras 2 (YAMNet requires it)
+RUN pip install --no-cache-dir \
+    "tensorflow-cpu>=2.12.0,<2.16.0" \
+    "tensorflow-hub>=0.15.0"
+
+# 2. CHANGED: Added explicitly bundled runtime libraries for ctranslate2 (faster-whisper)
+RUN pip install --no-cache-dir \
+    fastapi "uvicorn[standard]" \
+    numpy "soundfile>=0.12.1" "resampy>=0.4.2" librosa \
+    influxdb-client minio httpx python-multipart pyyaml faster-whisper \
+    nvidia-cublas-cu12 nvidia-cudnn-cu12
+
+# 3. ADDED: Expose the pip-installed NVIDIA shared objects directly to the system link loader
+ENV LD_LIBRARY_PATH=/usr/local/lib/python3.10/site-packages/nvidia/cublas/lib:/usr/local/lib/python3.10/site-packages/nvidia/cudnn/lib:$LD_LIBRARY_PATH
+
+COPY audio_ops_inference ./audio_ops_inference
+
+RUN mkdir -p /app/models /app/tasks /app/storage/tfhub_cache
+
+# YAMNet model cache — mount as a volume to survive restarts
+ENV TFHUB_CACHE_DIR=/app/storage/tfhub_cache
+ENV TF_CPP_MIN_LOG_LEVEL=2
+
+EXPOSE 8000
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD curl -f http://localhost:8000/health || exit 1
+
+# workers=1 — TF session and asyncio stream workers are not fork-safe
+CMD ["uvicorn", "audio_ops_inference.api:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]

@@ -1,0 +1,19 @@
+# Thin project repo — depends on the audio-ops-framework package.
+# Put your tasks under tasks/<name>/ and point AUDIO_OPS_TASKS_DIR at them.
+[tool.poetry]
+name = "my-audio-project"
+version = "0.1.0"
+description = "A project built on the Audio Ops Framework"
+authors = ["You <you@example.com>"]
+package-mode = false
+
+[tool.poetry.dependencies]
+python = ">=3.10,<3.15"
+# Co-development (recommended while the framework is changing):
+audio-ops-framework = { path = "../audio-ops-framework", develop = true }
+# Pin to a release instead once stable:
+# audio-ops-framework = { git = "https://github.com/your-org/audio-ops-framework", tag = "v0.3.0" }
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

@@ -81,7 +81,7 @@ INFERENCE_API = os.environ.get("INFERENCE_API_URL", "http://inference:8000")
 IGNORED_PATHS = {"test_tone"}
 
 # Tasks to run on stream chunks — must match loaded model names
-DEFAULT_TASKS = os.environ.get("STREAM_INFERENCE_TASKS", "sentiment,nonverbal").split(",")
+DEFAULT_TASKS = [t for t in os.environ.get("STREAM_INFERENCE_TASKS", "").split(",") if t.strip()]
 
 
 # ------------------------------------------------------------------ #

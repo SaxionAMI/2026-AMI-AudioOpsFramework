@@ -1,0 +1,7 @@
+.env
+storage/
+mlruns/
+models/
+audio_input/*/
+__pycache__/
+*.pyc

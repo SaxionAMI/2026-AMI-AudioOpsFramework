@@ -1,11 +1,11 @@
 """
 definitions.py — Dagster Definitions entry point.
 
-v2 additions:
-  • InfluxDBMetricsResource registered as "influxdb_metrics"
-  • All assets now have access to time-series logging
-  • Grafana dashboard auto-provisioning on startup
-  • Stream inference sensor + jobs wired in
+v4: Replaced the training_enabled guard with the capability model. Each task
+declares what it can do (capabilities / archetype in config.yaml); the builder
+assembles only the matching assets and jobs. serve-only tasks (Whisper, YAMNet)
+contribute nothing to the Dagster graph and run via the inference service.
+Legacy configs using `dagster.training_enabled` still resolve correctly.
 """
 
 import os
@@ -18,11 +18,14 @@ import inspect
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from audio_ops_dagster.registry import TaskConfig, discover_tasks
+from audio_ops_dagster.registry import TaskConfig, discover_tasks, task_search_dirs
+from audio_ops_dagster.capabilities import resolve_capabilities, produces_dagster_assets, describe
 from audio_ops_dagster.assets import build_audio_assets
 from audio_ops_dagster.jobs import build_audio_jobs
 from audio_ops_dagster.core.storage_resource import MinIOStorageResource
 from audio_ops_dagster.core.influxdb_resource import InfluxDBMetricsResource
+from audio_ops_dagster.core.metrics import NullMetricsResource
+from audio_ops_dagster.core.task_config_schema import validate_task_config
 from audio_ops_dagster.streaming.dagster_stream_sensor import (
     stream_discovery_sensor,
     stream_inference_job,
@@ -30,11 +33,10 @@ from audio_ops_dagster.streaming.dagster_stream_sensor import (
     stream_status_asset,
 )
 
-# ── 1. Automatic task code discovery ─────────────────────────────────────────
+# Auto-discovery: imports all task modules, triggers @register_task decorators
 discover_tasks()
 
 
-# ── 2. AudioTaskResource — mirrors TaskConfig + orchestration-only fields ────
 class AudioTaskResource(ConfigurableResource):
     task_name: str
     input_dir: str
@@ -61,12 +63,16 @@ class AudioTaskResource(ConfigurableResource):
         return TaskConfig(**filtered_data)
 
 
-# ── 3. Build shared resources from environment variables ─────────────────────
 minio_storage_resource = MinIOStorageResource.from_env()
-influxdb_metrics_resource = InfluxDBMetricsResource.from_env()
 
+# Pick the metrics sink centrally: InfluxDB if explicitly enabled, otherwise a
+# no-op. Assets only ever talk to "influxdb_metrics" — they don't know or care
+# which sink it is.
+if os.getenv("ENABLE_INFLUXDB", "false").lower() == "true":
+    influxdb_metrics_resource = InfluxDBMetricsResource.from_env()
+else:
+    influxdb_metrics_resource = NullMetricsResource()
 
-# ── 4. Iterate task folders and build assets/jobs ────────────────────────────
 all_assets = []
 all_jobs = []
 all_resources = {
@@ -74,37 +80,66 @@ all_resources = {
     "influxdb_metrics": influxdb_metrics_resource,
 }
 
-tasks_root = Path(__file__).parent / "tasks"
+seen_tasks = set()
+for tasks_root in task_search_dirs():
+    if not tasks_root.exists():
+        continue
+    for task_dir in sorted(tasks_root.iterdir()):
+        if not task_dir.is_dir():
+            continue
+        config_file = task_dir / "config.yaml"
+        if not config_file.exists():
+            continue
 
-if tasks_root.exists():
-    for task_dir in tasks_root.iterdir():
-        if task_dir.is_dir() and (task_dir / "config.yaml").exists():
-            task_name = task_dir.name
-            resource_key = f"{task_name}_config"
+        task_name = task_dir.name
+        if task_name in seen_tasks:
+            print(f"  ⚠ duplicate task '{task_name}' in {tasks_root} ignored (already loaded)")
+            continue
+        seen_tasks.add(task_name)
+        resource_key = f"{task_name}_config"
 
-            with open(task_dir / "config.yaml") as f:
-                data = yaml.safe_load(f)
+        with open(config_file) as f:
+            data = yaml.safe_load(f)
 
-                data["task_name"] = task_name
-                data.setdefault("input_dir", "audio_input/")
-                data.setdefault("output_dir", f"storage/{task_name}/")
+        # Validate early so mistakes surface here with a clear message rather
+        # than deep inside a run. Blocking errors skip the task; warnings inform.
+        errors, warnings = validate_task_config(data)
+        for w in warnings:
+            print(f"  ⚠ {task_name}: {w}")
+        if errors:
+            for e in errors:
+                print(f"  ✗ {task_name}: {e}")
+            print(f"  → skipping '{task_name}' until its config is fixed.")
+            continue
 
-                valid_fields = set(AudioTaskResource.__fields__.keys())
-                filtered = {k: v for k, v in data.items() if k in valid_fields}
+        # Resolve what this task can DO (explicit capabilities → archetype →
+        # legacy training_enabled fallback). The guard is gone: assembly is
+        # additive and each task only contributes the stages it declares.
+        caps = resolve_capabilities(data)
+        print(f"• {task_name}: capabilities = {describe(caps)}")
 
-                res_instance = AudioTaskResource(**filtered)
-                all_resources[resource_key] = res_instance
+        # Every task registers its resource (used by Dagster batch assets and
+        # available to tooling), regardless of capabilities.
+        data["task_name"] = task_name
+        data.setdefault("input_dir", f"audio_input/{task_name}/")
+        data.setdefault("output_dir", f"storage/{task_name}/")
+        data.setdefault("feature_type", "raw_waveform")
+        valid_fields = set(AudioTaskResource.__fields__.keys())
+        filtered = {k: v for k, v in data.items() if k in valid_fields}
+        all_resources[resource_key] = AudioTaskResource(**filtered)
 
-            all_assets.extend(build_audio_assets(task_name, resource_key))
-            all_jobs.extend(build_audio_jobs(task_name))
+        # serve-only tasks (Whisper, YAMNet) add nothing here — they live in the
+        # inference service. Skip asset/job assembly entirely for them.
+        if not produces_dagster_assets(caps):
+            continue
+
+        all_assets.extend(build_audio_assets(task_name, resource_key, caps))
+        all_jobs.extend(build_audio_jobs(task_name, caps))
 
 
-# ── 5. Streaming assets and jobs ─────────────────────────────────────────────
 all_assets += [stream_config_asset, stream_status_asset]
 all_jobs += [stream_inference_job]
 
-
-# ── 6. Final aggregated Definitions ──────────────────────────────────────────
 defs = Definitions(
     assets=all_assets,
     jobs=all_jobs,

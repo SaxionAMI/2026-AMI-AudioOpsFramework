@@ -54,10 +54,12 @@ class InfluxDBMetricsResource(ConfigurableResource):
     """
 
     url: str = "http://influxdb:8086"
-    token: str = EnvVar("INFLUXDB_ADMIN_TOKEN")
+    token: str = "unset"
     org: str = "audioops"
     bucket: str = "audio_metrics"
-    enabled: bool = True
+    # Off by default: the template ships without InfluxDB, so every write()
+    # short-circuits to a no-op. Opt in with ENABLE_INFLUXDB=true.
+    enabled: bool = False
     batch_size: int = 500
     flush_interval_ms: int = 1000
 
@@ -242,7 +244,7 @@ class InfluxDBMetricsResource(ConfigurableResource):
 
     @classmethod
     def from_env(cls) -> "InfluxDBMetricsResource":
-        enabled = os.getenv("ENABLE_INFLUXDB", "true").lower() != "false"
+        enabled = os.getenv("ENABLE_INFLUXDB", "false").lower() == "true"
         host = os.getenv("INFLUXDB_HOST", "influxdb")
         port = os.getenv("INFLUXDB_PORT", "8086")
         scheme = "https" if os.getenv("INFLUXDB_USE_SSL", "false").lower() == "true" else "http"

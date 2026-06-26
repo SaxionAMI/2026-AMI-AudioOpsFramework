@@ -1,10 +1,22 @@
 """
 Task Registry — auto-discovery and registration of audio processing tasks.
 
-v2: Added model_name to TaskConfig for HuggingFace model support.
+Discovery sources (both scanned):
+  1. The framework's built-in tasks package: audio_ops_dagster/tasks/
+  2. External task directories from the AUDIO_OPS_TASKS_DIR env var
+     (os.pathsep- or comma-separated). This is how a *project repo* keeps its
+     own tasks outside the installed framework package:
+
+         AUDIO_OPS_TASKS_DIR=./tasks dagster dev -m audio_ops_dagster.definitions
+         AUDIO_OPS_TASKS_DIR=./tasks audio-ops-serve
+
+Each task is a directory containing `task_<name>.py` (or `task.py`) with a
+class decorated by @register_task, plus a `config.yaml`.
 """
 
 import importlib
+import importlib.util
+import os
 import pkgutil
 import sys
 from pathlib import Path
@@ -82,29 +94,93 @@ def list_tasks() -> List[str]:
     return list(_TASKS.keys())
 
 
-def discover_tasks():
-    """Discover tasks from the tasks package subdirectories."""
+# ── Discovery ────────────────────────────────────────────────────────────────
+
+def external_task_dirs() -> List[Path]:
+    """External task directories declared via AUDIO_OPS_TASKS_DIR."""
+    raw = os.environ.get("AUDIO_OPS_TASKS_DIR", "")
+    dirs: List[Path] = []
+    for part in raw.replace(",", os.pathsep).split(os.pathsep):
+        part = part.strip()
+        if not part:
+            continue
+        p = Path(part).expanduser()
+        if p.is_dir():
+            dirs.append(p)
+        else:
+            print(f"⚠ AUDIO_OPS_TASKS_DIR entry not found: {part}")
+    return dirs
+
+
+def _builtin_tasks_dir() -> Optional[Path]:
     try:
         import audio_ops_dagster.tasks as tasks_pkg
+        return Path(tasks_pkg.__path__[0])
     except ImportError:
+        return None
+
+
+def task_search_dirs() -> List[Path]:
+    """All directories to scan for tasks: built-in package + external repos."""
+    dirs: List[Path] = []
+    builtin = _builtin_tasks_dir()
+    if builtin is not None:
+        dirs.append(builtin)
+    dirs.extend(external_task_dirs())
+    # dedup preserving order
+    seen, out = set(), []
+    for d in dirs:
+        r = d.resolve()
+        if r not in seen:
+            seen.add(r)
+            out.append(d)
+    return out
+
+
+def _load_external_task(task_dir: Path) -> None:
+    """Import a task module from an arbitrary directory (by file path)."""
+    name = task_dir.name
+    for file_name in (f"task_{name}.py", "task.py"):
+        f = task_dir / file_name
+        if not f.exists():
+            continue
+        mod_id = f"audio_ops_external.{name}.{file_name[:-3]}"
+        if mod_id in sys.modules:
+            return
+        try:
+            spec = importlib.util.spec_from_file_location(mod_id, f)
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[mod_id] = module
+            spec.loader.exec_module(module)
+        except Exception as e:
+            print(f"❌ Error loading {f}: {e}")
         return
 
-    package_path = tasks_pkg.__path__[0]
 
-    for _, module_name, is_pkg in pkgutil.iter_modules([package_path]):
-        if is_pkg:
-            task_dir = Path(package_path) / module_name
-            possible_files = [f"task_{module_name}.py", "task.py"]
-
-            for file_name in possible_files:
+def discover_tasks():
+    """Import all task modules so their @register_task decorators run."""
+    # 1. Built-in package tasks (importable as audio_ops_dagster.tasks.<name>)
+    builtin = _builtin_tasks_dir()
+    if builtin is not None:
+        for _, module_name, is_pkg in pkgutil.iter_modules([str(builtin)]):
+            if not is_pkg:
+                continue
+            task_dir = builtin / module_name
+            for file_name in (f"task_{module_name}.py", "task.py"):
                 if (task_dir / file_name).exists():
                     module_path = f"audio_ops_dagster.tasks.{module_name}.{file_name[:-3]}"
                     try:
                         if module_path not in sys.modules:
                             importlib.import_module(module_path)
-                        break
                     except Exception as e:
                         print(f"❌ Error loading {module_path}: {e}")
+                    break
+
+    # 2. External task directories from a project repo (loaded by file path)
+    for ext in external_task_dirs():
+        for sub in sorted(ext.iterdir()):
+            if sub.is_dir() and not sub.name.startswith((".", "__")):
+                _load_external_task(sub)
 
 
 # Run auto-discovery on import

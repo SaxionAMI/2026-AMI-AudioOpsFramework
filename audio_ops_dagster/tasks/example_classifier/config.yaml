@@ -1,0 +1,41 @@
+# example_classifier — reference task config.
+#
+# Capabilities decide what this task contributes. The full arc:
+#   train + evaluate + batch_infer + serve
+# Declare a subset to do less (see README "Capabilities"):
+#   archetype: pretrained_servable   → serve only, no Dagster assets
+#   capabilities: [train, evaluate]  → train + eval, no serving
+archetype: trainable_model
+
+task_name: example_classifier
+task_type: classification
+
+# ── Data ─────────────────────────────────────────────────────────────────────
+# Put training audio under input_dir/<class_name>/*.wav — the folder name is the
+# label. Features are written under output_dir/features/<label>/*.npy.
+input_dir: "audio_input/example_classifier"
+output_dir: "storage/example_classifier"
+feature_type: spectrogram          # spectrogram → (128, time) log-mel; or "raw"
+input_shape: [1, 128, 87]
+
+num_classes: 3
+class_labels:
+  - class_a
+  - class_b
+  - class_c
+
+# "group" keeps all segments of one recording in the same split (no leakage).
+split_strategy: group
+
+# ── Training ─────────────────────────────────────────────────────────────────
+batch_size: 16
+epochs: 5
+learning_rate: 0.001
+optimizer: adam
+criterion: cross_entropy
+model_architecture: small_cnn
+
+# ── Storage ──────────────────────────────────────────────────────────────────
+# Local filesystem by default. Set true (and STORAGE_BACKEND=minio) to sync
+# artifacts to object storage.
+use_remote_storage: false

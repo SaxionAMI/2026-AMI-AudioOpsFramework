@@ -155,6 +155,7 @@ class TrainConfig:
     class_names: list[str] = field(default_factory=list)
     class_weights: Optional[list[float]] = None
     input_shape: Optional[list[int]] = None
+    feature_type: str = "spectrogram"
 
 
 # ------------------------------------------------------------------ #
@@ -198,9 +199,11 @@ class ModelTrainer:
             self.train_loader = model
             self.val_loader   = train_loader
             raw_influx        = val_loader or influx_writer or influxdb_metrics
+            self.task         = None
         else:
             # Old style — task_or_config may be a string or task object
             raw_task  = task_or_config
+            self.task = raw_task if not isinstance(raw_task, str) else None
             task_name = (
                 raw_task if isinstance(raw_task, str)
                 else getattr(raw_task, "task_name", None)
@@ -223,6 +226,8 @@ class ModelTrainer:
                 checkpoint_dir    = str(checkpoint_dir),
                 class_names       = list(getattr(old_cfg, "class_labels", [])),
                 input_shape       = list(getattr(old_cfg, "input_shape", None) or []),
+                feature_type      = str(getattr(old_cfg, "feature_type", "spectrogram")),
+                sample_rate       = int(getattr(old_cfg, "sample_rate", 16_000)),
                 mlflow_experiment = str(task_name),
             )
 
@@ -232,6 +237,75 @@ class ModelTrainer:
         self._seed_everything(self.cfg.seed)
         logger.info("Trainer on device=%s task=%s model=%s",
                     self.device, self.cfg.task_name, self.cfg.model_name)
+
+    def test(self, model=None, test_loader=None):
+        """
+        Evaluate a trained model on a held-out loader.
+
+        Returns (avg_loss, metrics_dict). Metrics come from the task's
+        compute_metrics(y_true, y_pred_logits); falls back to accuracy if the
+        task isn't available. Loss uses the task's compute_loss when present,
+        else cross-entropy.
+        """
+        import torch
+        import numpy as np
+
+        model = model if model is not None else self.model
+        loader = test_loader if test_loader is not None else self.val_loader
+        device = self.device
+
+        model.to(device)
+        model.eval()
+
+        criterion = torch.nn.CrossEntropyLoss()
+        use_task_loss = self.task is not None and hasattr(self.task, "compute_loss")
+
+        all_logits, all_targets = [], []
+        total_loss, n_batches = 0.0, 0
+
+        with torch.no_grad():
+            for batch in loader:
+                x, y = batch
+                x = x.to(device)
+                logits = model(x)
+
+                yt = y.to(device) if hasattr(y, "to") else torch.as_tensor(y, device=device)
+                if use_task_loss:
+                    try:
+                        loss = self.task.compute_loss(model, (x, y), device)
+                    except Exception:
+                        loss = criterion(logits, yt)
+                else:
+                    loss = criterion(logits, yt)
+
+                total_loss += float(loss.item())
+                n_batches += 1
+                all_logits.append(logits.detach().cpu().numpy())
+                all_targets.append(
+                    y.detach().cpu().numpy() if hasattr(y, "detach") else np.asarray(y)
+                )
+
+        y_pred = np.concatenate(all_logits, axis=0) if all_logits else np.zeros((0, 1))
+        y_true = (
+            np.concatenate([np.atleast_1d(t) for t in all_targets], axis=0)
+            if all_targets else np.zeros((0,))
+        )
+        avg_loss = total_loss / max(1, n_batches)
+
+        metrics = None
+        if self.task is not None and hasattr(self.task, "compute_metrics"):
+            try:
+                metrics = self.task.compute_metrics(y_true, y_pred)
+            except Exception as e:
+                logger.warning("task.compute_metrics failed (%s) — using accuracy fallback", e)
+        if metrics is None:
+            acc = (
+                float((y_pred.argmax(axis=1) == y_true).mean())
+                if y_pred.ndim == 2 and len(y_true) else 0.0
+            )
+            metrics = {"accuracy": acc}
+
+        return avg_loss, metrics
 
     def train(self, model=None, train_loader=None, val_loader=None) -> str:
         """Run training. Returns path to best checkpoint."""
@@ -477,11 +551,8 @@ class ModelTrainer:
         model.task_name    = self.cfg.task_name
 
         checkpoint = {
-            # Full model — load with torch.load(), call .eval(), done.
-            # No architecture reconstruction needed.
-            "model":              model,
-
-            # State dict kept for transfer learning / inspection
+            # Weights only — safe to load with weights_only=True and portable
+            # across import paths (no pickled task classes in the file).
             "model_state_dict":   model.state_dict(),
 
             # Metadata
@@ -495,8 +566,8 @@ class ModelTrainer:
             "val_acc":            val_acc,
             "mlflow_run_id":      run_id,
             "saved_at":           time.time(),
-            "feature_config": {                          # ← ADD THIS
-                "feature_type": self.cfg.feature_type,       # from task config
+            "feature_config": {
+                "feature_type": self.cfg.feature_type,
                 "sample_rate": self.cfg.sample_rate,
                 "n_mels": 128,
                 "n_fft": 512,
@@ -529,7 +600,7 @@ class ModelTrainer:
 # Audio dataset with augmentation                                     #
 # ------------------------------------------------------------------ #
 
-class AudioDataset:
+class DirectoryAudioDataset:
     """
     PyTorch Dataset for audio classification.
     Expects directory structure:
@@ -563,7 +634,7 @@ class AudioDataset:
                 for p in (root / cls).glob(ext):
                     self.samples.append((str(p), self.class_to_idx[cls]))
 
-        logger.info("AudioDataset: %d samples, %d classes",
+        logger.info("DirectoryAudioDataset: %d samples, %d classes",
                     len(self.samples), len(class_names))
 
     def __len__(self) -> int:
@@ -635,7 +706,7 @@ def build_data_loaders(cfg: TrainConfig) -> tuple:
     import torch
     from torch.utils.data import DataLoader, Subset
 
-    dataset = AudioDataset(
+    dataset = DirectoryAudioDataset(
         data_dir=cfg.data_dir, class_names=cfg.class_names,
         sample_rate=cfg.sample_rate, clip_duration_s=cfg.clip_duration_s,
         augment=True,
@@ -647,7 +718,7 @@ def build_data_loaders(cfg: TrainConfig) -> tuple:
     train_idx = indices[:split]
     val_idx   = indices[split:]
 
-    val_dataset = AudioDataset(
+    val_dataset = DirectoryAudioDataset(
         data_dir=cfg.data_dir, class_names=cfg.class_names,
         sample_rate=cfg.sample_rate, clip_duration_s=cfg.clip_duration_s,
         augment=False,

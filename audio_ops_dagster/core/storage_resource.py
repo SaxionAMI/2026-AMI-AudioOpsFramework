@@ -9,6 +9,15 @@ Having a real ConfigurableResource means:
   • Fields are visible and configurable in the Dagster UI
   • The resource can be swapped out in tests (just pass a different instance)
   • Dagster knows about its lifecycle (set-up / tear-down)
+
+FRAMEWORK NOTE (local-first)
+----------------------------
+This template ships without an object-storage service, so the resource is
+DISABLED by default — every call is a silent no-op and the pipeline keeps all
+artifacts on the local filesystem. Turn it on with STORAGE_BACKEND=minio (or
+ENABLE_MINIO=true) plus the MINIO_* env vars. The asset code only ever uploads
+when a task config also sets `use_remote_storage: true`, so enabling the
+backend alone changes nothing until a task opts in.
 """
 
 from __future__ import annotations
@@ -30,9 +39,6 @@ class MinIOStorageResource(ConfigurableResource):
     """
     Dagster resource that exposes an S3StorageBackend to pipeline assets.
 
-    All fields have sensible defaults that match the docker-compose .env so
-    the resource works out of the box in local dev with zero extra config.
-
     Fields
     ------
     endpoint_url  : Full URL to the MinIO / S3 endpoint.
@@ -41,8 +47,9 @@ class MinIOStorageResource(ConfigurableResource):
     bucket        : Bucket name.  The bucket is created on first use.
     region        : S3 region (MinIO ignores this but boto3 requires it).
     use_ssl       : Enable HTTPS (set True in production).
-    enabled       : When False all storage calls are silent no-ops.
-                    Useful for running the pipeline without MinIO in CI.
+    enabled       : When False all storage calls are silent no-ops. Default
+                    False here (local-first); from_env() flips it on when
+                    STORAGE_BACKEND=minio/s3 or ENABLE_MINIO=true.
     """
 
     endpoint_url: str = "http://minio:9000"
@@ -51,16 +58,12 @@ class MinIOStorageResource(ConfigurableResource):
     bucket: str = "audioops-bucket"
     region: str = "us-east-1"
     use_ssl: bool = False
-    enabled: bool = True
+    enabled: bool = False
 
     # ── Internal backend (not part of the Dagster config schema) ─────────────
-    # We can't use @cached_property directly on Pydantic v2 models so we
-    # store the backend as a private attribute instead.
 
     def _get_backend(self) -> S3StorageBackend:
         """Lazily build (and cache) the underlying storage backend."""
-        # Pydantic v2 model_fields_set means we can't use __dict__ trick; use
-        # a module-level cache keyed on identity instead.
         cache_key = id(self)
         if cache_key not in _backend_cache:
             _backend_cache[cache_key] = S3StorageBackend(
@@ -162,10 +165,13 @@ class MinIOStorageResource(ConfigurableResource):
         """
         Build the resource entirely from environment variables.
 
-        Variable names match the existing .env / docker-compose.yml so no
-        changes to those files are required.
+        Local-first: storage is OFF unless STORAGE_BACKEND is minio/s3 or
+        ENABLE_MINIO=true. Variable names match docker-compose.yml / env.example.
         """
-        enabled = os.getenv("ENABLE_MINIO", "true").lower() != "false"
+        backend = os.getenv("STORAGE_BACKEND", "local").lower()
+        enable_minio = os.getenv("ENABLE_MINIO", "").lower()
+        enabled = backend in ("minio", "s3") or enable_minio == "true"
+
         use_ssl = os.getenv("MINIO_USE_SSL", "false").lower() == "true"
         scheme = "https" if use_ssl else "http"
 
