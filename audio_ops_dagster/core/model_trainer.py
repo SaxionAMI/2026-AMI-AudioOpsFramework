@@ -436,6 +436,19 @@ class ModelTrainer:
                         break
 
             best_ckpt = os.path.join(cfg.checkpoint_dir, "best_model.pt")
+            # Guarantee a checkpoint exists. With tiny/degenerate validation sets
+            # val_loss can be NaN (so `monitor < best_metric` is never True) and no
+            # "best" checkpoint gets written — but training still ran. Persist the
+            # final model so downstream steps always have weights to load.
+            if not os.path.exists(best_ckpt):
+                logger.warning(
+                    "No best checkpoint was saved during training "
+                    "(val metric never improved — often an empty/tiny val set). "
+                    "Saving final model weights as a fallback."
+                )
+                self._save_checkpoint(model, best_epoch or 0,
+                                      float(best_metric), 0.0, run_id)
+
             if os.path.exists(best_ckpt):
                 try:
                     mlflow.log_artifact(best_ckpt, artifact_path="checkpoints")
