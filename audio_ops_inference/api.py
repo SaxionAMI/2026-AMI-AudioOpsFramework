@@ -34,6 +34,7 @@ import io
 import json
 import logging
 import os
+import re
 import socket
 import time
 from contextlib import asynccontextmanager
@@ -142,15 +143,22 @@ PROC_QUEUE_MAX = int(os.environ.get("PROC_QUEUE_MAX", "5"))
 # briefly back up several chunks; we don't want to lose speech to that.
 STT_QUEUE_MAX = int(os.environ.get("STT_QUEUE_MAX", "12"))
 
-STADIUM_STREAMS = [
-    ("stadium_north", "rtsp://mediamtx:8554/stadium_north"),
-    ("stadium_south", "rtsp://mediamtx:8554/stadium_south"),
-    ("stadium_east",  "rtsp://mediamtx:8554/stadium_east"),
-    ("stadium_west",  "rtsp://mediamtx:8554/stadium_west"),
-]
+# ------------------------------------------------------------------ #
+# Stream auto-discovery (generic — no project-specific stream names).  #
+#                                                                      #
+# When STREAM_AUTODISCOVER is on, the service polls the MediaMTX API   #
+# and runs the loaded task models on whatever paths are publishing —   #
+# it knows nothing about what those streams represent. Projects decide  #
+# stream names by what they publish; the dashboard keys off stream_id. #
+# ------------------------------------------------------------------ #
+AUTODISCOVER          = os.environ.get("STREAM_AUTODISCOVER", "false").lower() in ("1", "true", "yes")
+MEDIAMTX_API_URL      = os.environ.get("MEDIAMTX_API_URL", os.environ.get("MEDIAMTX_API", "http://mediamtx:9997"))
+RTSP_BASE_URL         = os.environ.get("RTSP_BASE_URL", "rtsp://mediamtx:8554")
+AUTODISCOVER_INTERVAL = float(os.environ.get("STREAM_AUTODISCOVER_INTERVAL", "5"))
+AUTODISCOVER_FILTER   = os.environ.get("STREAM_AUTODISCOVER_FILTER", "")  # optional regex on path name
 
-TRIAGE_STREAM_ID  = "triage_call"
-TRIAGE_STREAM_URL = "rtsp://mediamtx:8554/triage_call"
+# stream_ids the auto-discovery loop created (so it never removes manual ones)
+_autodiscovered: set = set()
 
 
 # ------------------------------------------------------------------ #
@@ -1253,6 +1261,7 @@ async def lifespan(app: FastAPI):
         sid   = parts[1] if len(parts) > 1 else f"auto_{len(streams)}"
         await _add_stream(sid, url)
     heartbeat = asyncio.create_task(_heartbeat_loop())
+    discover  = asyncio.create_task(_autodiscover_loop()) if AUTODISCOVER else None
     yield
     for h in streams.values():
         h.active = False
@@ -1263,11 +1272,70 @@ async def lifespan(app: FastAPI):
         if h.stt_task:
             h.stt_task.cancel()
     heartbeat.cancel()
+    if discover:
+        discover.cancel()
 
 
 async def _heartbeat_loop() -> None:
     while True:
         await asyncio.sleep(15)
+
+
+def _fetch_mediamtx_paths_sync() -> list:
+    """Return the names of paths currently publishing to MediaMTX."""
+    import urllib.request
+    url = MEDIAMTX_API_URL.rstrip("/") + "/v3/paths/list"
+    with urllib.request.urlopen(url, timeout=3) as resp:
+        data = json.loads(resp.read().decode())
+    # 'ready' means a publisher is active on that path
+    return [it["name"] for it in data.get("items", []) if it.get("ready", True)]
+
+
+async def _list_mediamtx_paths() -> list:
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, _fetch_mediamtx_paths_sync)
+
+
+async def _autodiscover_loop() -> None:
+    """Poll MediaMTX; run loaded models on whatever is publishing.
+
+    Generic: the framework never names streams. A path appearing in MediaMTX
+    becomes a stream (stream_id = path name); a path disappearing tears its
+    stream down. Only auto-added streams are auto-removed — manual /streams
+    registrations are left alone.
+    """
+    pattern = re.compile(AUTODISCOVER_FILTER) if AUTODISCOVER_FILTER else None
+    logger.info("Stream auto-discovery ON — polling %s every %ss%s",
+                MEDIAMTX_API_URL, AUTODISCOVER_INTERVAL,
+                f" (filter: {AUTODISCOVER_FILTER})" if AUTODISCOVER_FILTER else "")
+    while True:
+        try:
+            names = await _list_mediamtx_paths()
+            present = set()
+            for name in names:
+                if pattern and not pattern.search(name):
+                    continue
+                present.add(name)
+                if name not in streams or not streams[name].active:
+                    url = f"{RTSP_BASE_URL}/{name}"
+                    try:
+                        await _add_stream(name, url)
+                        _autodiscovered.add(name)
+                        logger.info("Auto-discovered stream: %s <- %s", name, url)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("Auto-add failed for %s: %s", name, exc)
+            # tear down auto-added streams that are no longer publishing
+            for sid in list(_autodiscovered):
+                if sid not in present and sid in streams:
+                    try:
+                        await _remove_stream(sid)
+                    except Exception:  # noqa: BLE001
+                        pass
+                    _autodiscovered.discard(sid)
+                    logger.info("Auto-removed stream (no longer publishing): %s", sid)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("auto-discovery poll error: %s", exc)
+        await asyncio.sleep(AUTODISCOVER_INTERVAL)
         for h in streams.values():
             influx.write_stream_health(
                 stream_id=h.stream_id,
@@ -1385,6 +1453,16 @@ class AddStreamRequest(BaseModel):
     chunk_duration_ms: int = Field(CHUNK_MS, ge=100, le=10000)
 
 
+class BatchStreamItem(BaseModel):
+    stream_id:         str
+    url:               str
+    chunk_duration_ms: int = Field(CHUNK_MS, ge=100, le=10000)
+
+
+class BatchStreamRequest(BaseModel):
+    streams: list[BatchStreamItem]
+
+
 @app.post("/streams", status_code=201)
 async def add_stream(req: AddStreamRequest):
     sid = req.stream_id or f"stream_{int(time.time())}"
@@ -1411,43 +1489,37 @@ async def list_streams():
         for sid, h in streams.items()]}
 
 
-@app.post("/triage/start")
-async def start_triage():
-    if TRIAGE_STREAM_ID not in streams or not streams[TRIAGE_STREAM_ID].active:
-        await _add_stream(TRIAGE_STREAM_ID, TRIAGE_STREAM_URL)
-        status = "started"
-    else:
-        status = "already running"
-    return {"status": "ok", "stream_id": TRIAGE_STREAM_ID, "stream_status": status}
-
-
-@app.post("/triage/stop")
-async def stop_triage():
-    if TRIAGE_STREAM_ID in streams:
-        await _remove_stream(TRIAGE_STREAM_ID)
-    return {"status": "ok", "removed": TRIAGE_STREAM_ID}
-
-
-@app.post("/simulation/start")
-async def start_simulation():
+@app.post("/streams/batch", status_code=201)
+async def add_streams_batch(req: "BatchStreamRequest"):
+    """Register many streams at once. Callers (projects) supply the names + URLs;
+    the framework stays neutral about what the streams represent."""
     results = {}
-    for sid, url in STADIUM_STREAMS:
-        if sid not in streams or not streams[sid].active:
-            await _add_stream(sid, url)
-            results[sid] = "started"
+    for item in req.streams:
+        if item.stream_id in streams and streams[item.stream_id].active:
+            results[item.stream_id] = "already running"
         else:
-            results[sid] = "already running"
+            await _add_stream(item.stream_id, item.url, item.chunk_duration_ms)
+            results[item.stream_id] = "started"
     return {"status": "ok", "streams": results}
 
 
-@app.post("/simulation/stop")
-async def stop_simulation():
-    removed = []
-    for sid, _ in STADIUM_STREAMS:
-        if sid in streams:
-            await _remove_stream(sid)
-            removed.append(sid)
-    return {"status": "ok", "removed": removed}
+@app.get("/discovery")
+async def discovery_status():
+    """Report auto-discovery state and what MediaMTX is currently publishing."""
+    paths = []
+    if AUTODISCOVER:
+        try:
+            paths = await _list_mediamtx_paths()
+        except Exception as exc:  # noqa: BLE001
+            return {"enabled": True, "error": str(exc), "mediamtx_api": MEDIAMTX_API_URL}
+    return {
+        "enabled": AUTODISCOVER,
+        "mediamtx_api": MEDIAMTX_API_URL,
+        "interval_s": AUTODISCOVER_INTERVAL,
+        "filter": AUTODISCOVER_FILTER or None,
+        "publishing_paths": paths,
+        "auto_streams": sorted(_autodiscovered),
+    }
 
 
 # ------------------------------------------------------------------ #
