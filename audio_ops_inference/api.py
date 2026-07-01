@@ -419,30 +419,37 @@ class ModelWrapper:
         })
 
     def _extract_features(self, audio: np.ndarray):
-        import torch, librosa
+        import torch
         cfg = self.feature_cfg
-        ft  = cfg.get("feature_type", "mel_spectrogram")
-        if ft == "mel_spectrogram":
-            mel = librosa.feature.melspectrogram(
-                y=audio, sr=cfg["sample_rate"], n_mels=cfg["n_mels"],
-                n_fft=cfg["n_fft"], hop_length=cfg["hop_length"])
-            features = librosa.power_to_db(mel, ref=np.max)
-            target_w = self.input_shape[2] if len(self.input_shape) == 3 else 87
-            features = (np.pad(features, ((0, 0), (0, target_w - features.shape[1])))
-                        if features.shape[1] < target_w else features[:, :target_w])
-            return torch.from_numpy(features).float().unsqueeze(0).unsqueeze(0)
-        elif ft == "waveform":
+        ft  = cfg.get("feature_type", "spectrogram")
+        sr  = int(cfg.get("sample_rate", SAMPLE_RATE))
+
+        # Use the SAME feature extractor the model was trained with, from the
+        # framework's registry. This guarantees train/serve parity — a mismatch
+        # here feeds the model malformed input and produces NaN/garbage output.
+        try:
+            from audio_ops_dagster.core.features import get_feature_extractor
+            extractor = get_feature_extractor(ft)
+            features = extractor(audio.astype("float32"), sr)   # -> (F, T) float32
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("feature extractor '%s' unavailable (%s) — falling back to raw", ft, exc)
             return torch.from_numpy(audio).float().unsqueeze(0).unsqueeze(0)
-        elif ft == "spectrogram":
-            wave = torch.from_numpy(audio).float()
-            spec = torch.stft(wave, n_fft=cfg.get("n_fft", 512),
-                              hop_length=cfg.get("hop_length", 160), return_complex=True)
-            features = spec.abs().numpy()
-            target_w = self.input_shape[2] if len(self.input_shape) == 3 else 87
-            features = (np.pad(features, ((0, 0), (0, target_w - features.shape[1])))
-                        if features.shape[1] < target_w else features[:, :target_w])
+
+        # waveform/raw come back 1-D; classifier expects (1,1,F,T)
+        if features.ndim == 1:
             return torch.from_numpy(features).float().unsqueeze(0).unsqueeze(0)
-        raise ValueError(f"Unknown feature_type '{ft}'")
+
+        # pad/crop the time axis to the model's expected width
+        target_w = self.input_shape[2] if len(self.input_shape) == 3 else features.shape[1]
+        if features.shape[1] < target_w:
+            features = np.pad(features, ((0, 0), (0, target_w - features.shape[1])))
+        elif features.shape[1] > target_w:
+            features = features[:, :target_w]
+
+        t = torch.from_numpy(np.ascontiguousarray(features)).float()
+        # guard against any non-finite values reaching the model
+        t = torch.nan_to_num(t, nan=0.0, posinf=0.0, neginf=0.0)
+        return t.unsqueeze(0).unsqueeze(0)
 
     def predict(self, audio: np.ndarray, media_t0: float = 0.0) -> dict:
         import torch
