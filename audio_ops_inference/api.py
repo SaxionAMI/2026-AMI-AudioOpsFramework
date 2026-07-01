@@ -186,18 +186,29 @@ class InfluxWriter:
         if not self._ok:
             return
         try:
+            import math
             from influxdb_client import Point
+
+            def _f(x, default=0.0):
+                try:
+                    v = float(x)
+                    return v if math.isfinite(v) else default
+                except (TypeError, ValueError):
+                    return default
+
             p = (Point(f"inference_{task}")
                  .tag("hostname", _HOSTNAME).tag("task", task)
                  .tag("source_type", source).tag("stream_id", stream_id or "none")
-                 .field("label", label).field("confidence", confidence)
-                 .field("rms", rms).field("audio_duration_s", duration_s)
-                 .field("media_ts", float(media_ts)))
+                 .field("label", str(label))
+                 .field("confidence", _f(confidence))
+                 .field("rms", _f(rms))
+                 .field("audio_duration_s", _f(duration_s))
+                 .field("media_ts", _f(media_ts)))
             for cls, score in (scores or {}).items():
-                p = p.field(f"score_{cls}", float(score))
+                p = p.field(f"score_{cls}", _f(score))
             self._write.write(bucket=INFLUXDB_BUCKET, org=INFLUXDB_ORG, record=p)
         except Exception as exc:
-            logger.debug("InfluxDB write error: %s", exc)
+            logger.warning("InfluxDB classifier write error: %s", exc)
 
     def write_stt(self, task, transcription, confidence, word_count, language,
                   rms, source, stream_id="", duration_s=0.0, media_ts=0.0):
