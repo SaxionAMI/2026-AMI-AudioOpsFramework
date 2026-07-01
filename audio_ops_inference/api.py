@@ -414,14 +414,23 @@ class ModelWrapper:
         self.class_names = getattr(model, "class_names", [])
         self.input_shape = getattr(model, "input_shape", [1, 128, 87])
         self.feature_cfg = getattr(model, "feature_config", {
-            "feature_type": "mel_spectrogram", "sample_rate": 16000,
+            "feature_type": "spectrogram", "sample_rate": 16000,
             "n_mels": 128, "n_fft": 512, "hop_length": 160, "clip_duration_s": 3.0,
         })
+
+    # Map legacy/config feature names to what the framework registry actually
+    # registers (the training default is the normalized log-mel "spectrogram").
+    _FEATURE_ALIASES = {
+        "mel_spectrogram": "spectrogram",
+        "melspectrogram":  "spectrogram",
+        "log_mel":         "logmel",
+    }
 
     def _extract_features(self, audio: np.ndarray):
         import torch
         cfg = self.feature_cfg
         ft  = cfg.get("feature_type", "spectrogram")
+        ft  = self._FEATURE_ALIASES.get(ft, ft)
         sr  = int(cfg.get("sample_rate", SAMPLE_RATE))
 
         # Use the SAME feature extractor the model was trained with, from the
