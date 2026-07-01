@@ -433,11 +433,11 @@ class ModelWrapper:
             features = extractor(audio.astype("float32"), sr)   # -> (F, T) float32
         except Exception as exc:  # noqa: BLE001
             logger.warning("feature extractor '%s' unavailable (%s) — falling back to raw", ft, exc)
-            return torch.from_numpy(audio).float().unsqueeze(0).unsqueeze(0)
+            return torch.from_numpy(np.ascontiguousarray(audio)).float()
 
-        # waveform/raw come back 1-D; classifier expects (1,1,F,T)
+        # waveform/raw come back 1-D; return as-is, predict() will batch it
         if features.ndim == 1:
-            return torch.from_numpy(features).float().unsqueeze(0).unsqueeze(0)
+            return torch.from_numpy(np.ascontiguousarray(features)).float()
 
         # pad/crop the time axis to the model's expected width
         target_w = self.input_shape[2] if len(self.input_shape) == 3 else features.shape[1]
@@ -449,7 +449,7 @@ class ModelWrapper:
         t = torch.from_numpy(np.ascontiguousarray(features)).float()
         # guard against any non-finite values reaching the model
         t = torch.nan_to_num(t, nan=0.0, posinf=0.0, neginf=0.0)
-        return t.unsqueeze(0).unsqueeze(0)
+        return t   # (F, T) — predict() normalizes to 4D
 
     def predict(self, audio: np.ndarray, media_t0: float = 0.0) -> dict:
         import torch
@@ -457,6 +457,12 @@ class ModelWrapper:
             audio = audio.mean(axis=1)
         dur = len(audio) / SAMPLE_RATE
         tensor = self._extract_features(audio)
+        # Conv2D classifiers want (batch, channel, F, T). Extractors may return
+        # (F,T), (C,F,T), or already-batched tensors — normalize to exactly 4D.
+        while tensor.dim() < 4:
+            tensor = tensor.unsqueeze(0)
+        while tensor.dim() > 4:
+            tensor = tensor.squeeze(0)
         with torch.no_grad():
             out = self.model(tensor)
         logits = out.logits if hasattr(out, "logits") else out
