@@ -225,11 +225,24 @@ class ModelTrainer:
                 learning_rate     = float(getattr(old_cfg, "learning_rate", 1e-3)),
                 checkpoint_dir    = str(checkpoint_dir),
                 class_names       = list(getattr(old_cfg, "class_labels", [])),
+                class_weights     = (list(getattr(old_cfg, "class_weights", None))
+                                     if getattr(old_cfg, "class_weights", None) else None),
                 input_shape       = list(getattr(old_cfg, "input_shape", None) or []),
                 feature_type      = str(getattr(old_cfg, "feature_type", "spectrogram")),
                 sample_rate       = int(getattr(old_cfg, "sample_rate", 16_000)),
                 mlflow_experiment = str(task_name),
             )
+            # Optional training knobs — only override the dataclass default when
+            # the task config actually sets them (keeps back-compat for old tasks).
+            for _src, _dst in (
+                ("weight_decay", "weight_decay"), ("warmup_epochs", "warmup_epochs"),
+                ("grad_clip", "grad_clip"), ("early_stop_patience", "early_stop_patience"),
+                ("early_stop_metric", "early_stop_metric"), ("lr_min", "lr_min"),
+                ("use_amp", "use_amp"), ("seed", "seed"),
+            ):
+                _v = getattr(old_cfg, _src, None)
+                if _v is not None and hasattr(self.cfg, _dst):
+                    setattr(self.cfg, _dst, _v)
 
         self.dagster_run_id = str(dagster_run_id)
         self._influx        = _InfluxAdapter(raw_influx, run_id=self.dagster_run_id)

@@ -169,7 +169,12 @@ def build_audio_assets(task_name: str, resource_key: str, capabilities):
         else:
             input_dir, base_out = config.input_dir, config.output_dir
 
-        processor = AudioProcessor(feature_type=config.feature_type)
+        processor = AudioProcessor(
+            feature_type=config.feature_type,
+            sample_rate=int(getattr(config, "sample_rate", 16000)),
+            segment_duration=float(getattr(config, "segment_duration", 1.0)),
+            overlap=float(getattr(config, "segment_overlap", 0.25)),
+        )
         feature_out = os.path.abspath(os.path.join(base_out, "features"))
         stats = processor.process_directory(input_dir, feature_out)
 
