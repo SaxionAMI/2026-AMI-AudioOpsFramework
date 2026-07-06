@@ -91,3 +91,30 @@ def _mfcc(y: np.ndarray, sr: int) -> np.ndarray:
 def _raw(y: np.ndarray, sr: int) -> np.ndarray:
     """Raw waveform, shape (T,). For models that do their own feature extraction."""
     return y.astype(np.float32)
+
+
+# ── AST (Audio Spectrogram Transformer) features ─────────────────────────────
+# Produces the exact input MIT/ast-finetuned-audioset-10-10-0.4593 expects:
+# a (1024, 128) normalized mel patch (AudioSet mean/std). Registered here so any
+# task/project (sentiment, triage, ...) can select feature_type: ast and get
+# identical features in training AND serving — no per-project reimplementation.
+# The HF feature extractor is loaded lazily and cached, so importing this module
+# stays cheap (task discovery doesn't pay the transformers import cost).
+_AST_FE = None
+_AST_CHECKPOINT = "MIT/ast-finetuned-audioset-10-10-0.4593"
+
+
+def _get_ast_fe():
+    global _AST_FE
+    if _AST_FE is None:
+        from transformers import ASTFeatureExtractor
+        _AST_FE = ASTFeatureExtractor.from_pretrained(_AST_CHECKPOINT)
+    return _AST_FE
+
+
+@register_feature("ast")
+def _ast(y: np.ndarray, sr: int) -> np.ndarray:
+    """AST mel features, shape (1024, 128) float32 (AudioSet-normalized)."""
+    fe = _get_ast_fe()
+    out = fe(y, sampling_rate=sr, return_tensors="np")
+    return out["input_values"][0].astype(np.float32)

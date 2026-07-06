@@ -40,6 +40,23 @@ class TaskConfigSchema(BaseModel):
     task_type: Optional[str] = None
     serve_wrapper: Optional[str] = None
 
+    # ── Training knobs (declared so they are validated + documented in ONE
+    #    place, and never silently ignored). The trainer reads these directly.
+    #    Defaults match the trainer's own defaults, so omitting them is safe.
+    batch_size: int = 32
+    epochs: int = 10
+    learning_rate: float = 1e-3
+    weight_decay: float = 0.0
+    warmup_epochs: int = 0
+    grad_clip: Optional[float] = None
+    early_stop_patience: int = 10
+    early_stop_metric: str = "val_loss"
+    class_weights: Optional[List[float]] = None
+    sample_rate: int = 16000
+    segment_duration: float = 1.0
+    segment_overlap: float = 0.25
+    model_architecture: Optional[str] = None
+
     use_remote_storage: bool = False
 
 
