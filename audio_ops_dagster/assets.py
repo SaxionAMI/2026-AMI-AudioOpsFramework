@@ -222,9 +222,24 @@ def build_audio_assets(task_name: str, resource_key: str, capabilities):
         metrics = context.resources.influxdb_metrics
         task_config = config.to_task_config()
 
-        feature_dir = os.path.join(config.output_dir, "features")
-        dataset_dir = os.path.join(config.output_dir, "dataset")
+        # Prefer the exact path the upstream feature step reported (single source
+        # of truth), falling back to the config-derived path for older runs.
+        feature_dir = None
+        if isinstance(segmented_features, dict):
+            feature_dir = segmented_features.get("feature_dir")
+        if not feature_dir:
+            feature_dir = os.path.abspath(os.path.join(config.output_dir, "features"))
+        dataset_dir = os.path.abspath(os.path.join(config.output_dir, "dataset"))
         strategy = getattr(config, "split_strategy", "random")
+
+        if not os.path.isdir(feature_dir) or not any(
+            f.endswith(".npy") for _r, _d, _fs in os.walk(feature_dir) for f in _fs
+        ):
+            raise ValueError(
+                f"No .npy feature files under {feature_dir}. The feature-extraction "
+                f"step must run and complete before splits. Check that "
+                f"segmented_features wrote files here (output_dir='{config.output_dir}')."
+            )
 
         split_paths = AudioDataset.create_splits_csv(
             feature_dir=feature_dir,
@@ -426,9 +441,23 @@ def build_audio_assets(task_name: str, resource_key: str, capabilities):
             )
             if os.path.exists(checkpoint_path):
                 _ckpt = torch.load(checkpoint_path, weights_only=True)
-                model.load_state_dict(
-                    _ckpt["model_state_dict"] if isinstance(_ckpt, dict) and "model_state_dict" in _ckpt else _ckpt
-                )
+                _state = _ckpt["model_state_dict"] if isinstance(_ckpt, dict) and "model_state_dict" in _ckpt else _ckpt
+                try:
+                    model.load_state_dict(_state)
+                    context.log.info(f"Loaded checkpoint: {checkpoint_path}")
+                except RuntimeError as exc:
+                    # Architecture mismatch (e.g. a stale checkpoint from a different
+                    # model backend). Fail loudly but don't crash the whole pipeline.
+                    context.log.error(
+                        f"Checkpoint at {checkpoint_path} does not match the current "
+                        f"model architecture — it looks like a checkpoint from a "
+                        f"different model. Delete it and retrain. ({str(exc)[:200]})"
+                    )
+                    raise ValueError(
+                        f"Incompatible checkpoint for this model architecture at "
+                        f"{checkpoint_path}. Remove the old checkpoint (rm "
+                        f"{checkpoint_path}) and retrain so a matching one is written."
+                    ) from None
                 context.log.info(f"Loaded checkpoint: {checkpoint_path}")
             else:
                 context.log.warning(f"No checkpoint at {checkpoint_path} — using an untrained model.")
