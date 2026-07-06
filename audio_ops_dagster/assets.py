@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Optional
 from datetime import datetime, timezone
 
-from dagster import asset, AssetKey, AssetIn, Output, MetadataValue, Config
+from dagster import asset, AssetKey, AssetIn, Output, MetadataValue, Config, Nothing
 
 from audio_ops_dagster.core.audio_processor import AudioProcessor
 from audio_ops_dagster.core.audio_dataset import AudioDataset, InferenceDataset
@@ -407,7 +407,18 @@ def build_audio_assets(task_name: str, resource_key: str, capabilities):
 
     @asset(
         name=f"{prefix}_inference_results",
-        ins={"segmented_features": AssetIn(key=AssetKey(f"{prefix}_segmented_features"))},
+        ins={
+            "segmented_features": AssetIn(key=AssetKey(f"{prefix}_segmented_features")),
+            # Optional ordering edge: when the full training job runs, this makes
+            # inference wait for the freshly-trained checkpoint instead of racing
+            # it. In the inference-only job (trained_model not selected), Dagster
+            # treats a Nothing-input from an unselected asset as satisfied, so the
+            # fast path still works with a pre-existing checkpoint.
+            "trained_model": AssetIn(
+                key=AssetKey(f"{prefix}_trained_model"),
+                dagster_type=Nothing,
+            ),
+        },
         required_resource_keys=_required,
         group_name=prefix,
     )

@@ -55,6 +55,8 @@ class AudioProcessor:
         logger.info("Found %d audio files under %s (feature_type=%s)",
                     len(audio_files), input_path, self.feature_type)
 
+        errors = 0
+        first_error = None
         for audio_file in audio_files:
             try:
                 label = audio_file.parent.name if audio_file.parent != input_path else "unknown"
@@ -73,8 +75,21 @@ class AudioProcessor:
 
                 stats["total_files"] += 1
             except Exception as e:
+                errors += 1
+                if first_error is None:
+                    import traceback
+                    first_error = traceback.format_exc()
                 logger.error("Error processing %s: %s", audio_file, e)
 
-        logger.info("Processed %d files into %d segments.",
-                    stats["total_files"], stats["total_segments"])
+        logger.info("Processed %d files into %d segments (%d errored).",
+                    stats["total_files"], stats["total_segments"], errors)
+
+        # Fail loudly instead of reporting a hollow success: if we found audio
+        # but produced zero segments, the extractor is broken — surface the real
+        # traceback rather than letting downstream steps hit "no .npy files".
+        if audio_files and stats["total_segments"] == 0:
+            raise RuntimeError(
+                f"Feature extraction produced 0 segments from {len(audio_files)} "
+                f"audio files — every file failed. First error was:\n{first_error}"
+            )
         return stats
