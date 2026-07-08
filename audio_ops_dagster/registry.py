@@ -45,6 +45,25 @@ class TaskConfig:
     criterion: str = "cross_entropy"
     model_architecture: str = "cnn"
 
+    # ── Feature/segmentation knobs ───────────────────────────────────────────
+    # These MUST live here (not only in the validation schema) or they never
+    # reach AudioProcessor / the trainer: to_task_config() and the resource-field
+    # filter both drop any key that isn't a declared field. Previously, omitting
+    # them meant `segment_duration: 10.0` in config.yaml was silently ignored and
+    # AST was fed 1-second windows instead of its ~10s pretraining window.
+    sample_rate: int = 16000
+    segment_duration: float = 1.0
+    segment_overlap: float = 0.25
+    force_recompute: bool = False
+
+    # ── Training knobs (read directly by ModelTrainer) ───────────────────────
+    weight_decay: float = 0.0
+    warmup_epochs: int = 0
+    grad_clip: Optional[float] = None
+    early_stop_patience: int = 10
+    early_stop_metric: str = "val_loss"
+    class_weights: Optional[List[float]] = None
+
     # HuggingFace model identifier (for STT, etc.)
     model_name: Optional[str] = None
 

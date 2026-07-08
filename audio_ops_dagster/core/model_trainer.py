@@ -33,6 +33,19 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 
+def _fmt_eta(seconds: float) -> str:
+    """Human-friendly ETA: '45s', '12m 30s', or '1h 05m'."""
+    seconds = max(0.0, float(seconds))
+    if seconds < 60:
+        return f"{seconds:.0f}s"
+    if seconds < 3600:
+        m, s = divmod(int(seconds), 60)
+        return f"{m}m {s:02d}s"
+    h, rem = divmod(int(seconds), 3600)
+    m = rem // 60
+    return f"{h}h {m:02d}m"
+
+
 # ------------------------------------------------------------------ #
 # InfluxDB adapter — works with both resource types                   #
 # ------------------------------------------------------------------ #
@@ -144,9 +157,13 @@ class TrainConfig:
     early_stop_metric: str = "val_loss"
 
     # Logging
-    log_every_n_batches: int = 10
+    log_every_n_batches: int = 50
     checkpoint_dir: str = "/app/checkpoints"
     mlflow_experiment: str = ""
+
+    # Resume: on start, if a compatible last_checkpoint.pt exists, continue from
+    # it instead of restarting at epoch 0.
+    resume: bool = True
 
     # Reproducibility
     seed: int = 42
@@ -189,8 +206,20 @@ class ModelTrainer:
         checkpoint_dir: str = "/app/checkpoints",
         influxdb_metrics=None,
         dagster_run_id: str = "",
+        context=None,
     ):
         import torch
+
+        # Dagster asset/op context (optional). When present, progress lines go to
+        # context.log.info so they show LIVE in the Dagster run view, and per-epoch
+        # AssetObservations give the UI a metric curve. Falls back to the module
+        # logger for standalone/test use.
+        self._ctx = context
+        self._log = (
+            context.log.info
+            if context is not None and hasattr(context, "log")
+            else logger.info
+        )
 
         if isinstance(task_or_config, TrainConfig):
             # New style
@@ -368,6 +397,40 @@ class ModelTrainer:
             scaler = torch.cuda.amp.GradScaler()
             logger.info("Mixed-precision (AMP) enabled")
 
+        # ── Resume state (defaults for a fresh run) ──────────────────────────
+        best_metric      = float("inf")
+        best_epoch       = 0
+        patience_counter = 0
+        start_epoch      = self._maybe_resume(model, optimizer, scheduler)
+        if start_epoch and isinstance(start_epoch, tuple):
+            start_epoch, best_metric, best_epoch, patience_counter = start_epoch
+
+        # Nothing left to do — a previous run already finished all epochs for this
+        # exact config. Skip straight to the existing best checkpoint.
+        if start_epoch >= cfg.epochs:
+            best_ckpt = os.path.join(cfg.checkpoint_dir, "best_model.pt")
+            self._log(
+                f"Training already complete for this config "
+                f"({start_epoch}/{cfg.epochs} epochs done). Using existing "
+                f"checkpoint: {best_ckpt}"
+            )
+            if os.path.exists(best_ckpt):
+                return best_ckpt
+            self._log("No best checkpoint on disk despite a completed run — "
+                      "re-running the final epoch to regenerate it.")
+            start_epoch = max(0, cfg.epochs - 1)
+
+        n_train_batches = len(self.train_loader) if self.train_loader is not None else 0
+        n_val_batches   = len(self.val_loader) if self.val_loader is not None else 0
+        self._log(
+            f"Training '{cfg.task_name}' [{cfg.model_name}] on {self.device}: "
+            f"epochs {start_epoch + 1}→{cfg.epochs}, "
+            f"{n_train_batches} train / {n_val_batches} val batches per epoch, "
+            f"batch_size={cfg.batch_size}, lr={cfg.learning_rate:g}, "
+            f"weight_decay={cfg.weight_decay:g}, early_stop_patience={cfg.early_stop_patience}"
+        )
+        train_start = time.time()
+
         mlflow.set_tracking_uri(os.environ.get("MLFLOW_TRACKING_URI", "http://mlflow:5000"))
         _active = mlflow.active_run()
         if _active is None:
@@ -376,10 +439,7 @@ class ModelTrainer:
         else:
             _mlflow_ctx = nullcontext(_active)
 
-        best_metric      = float("inf")
-        best_epoch       = 0
-        patience_counter = 0
-        history          = []
+        history = []
 
         with _mlflow_ctx as run:
             run_id = run.info.run_id
@@ -399,7 +459,7 @@ class ModelTrainer:
                 "input_shape":     str(cfg.input_shape),
             })
 
-            for epoch in range(cfg.epochs):
+            for epoch in range(start_epoch, cfg.epochs):
                 epoch_start = time.time()
                 current_lr  = scheduler.get_last_lr()[0] \
                               if hasattr(scheduler, "get_last_lr") else cfg.learning_rate
@@ -410,6 +470,11 @@ class ModelTrainer:
                 val_loss, val_acc, _ = self._validate(model, criterion)
                 scheduler.step()
                 epoch_duration = time.time() - epoch_start
+
+                # ── ETA over the whole run (avg completed-epoch time × remaining)
+                epochs_done   = (epoch - start_epoch) + 1
+                avg_epoch_s   = (time.time() - train_start) / max(epochs_done, 1)
+                remaining     = avg_epoch_s * (cfg.epochs - (epoch + 1))
 
                 mlflow.log_metrics(
                     {"train_loss": train_loss, "train_acc": train_acc,
@@ -423,12 +488,20 @@ class ModelTrainer:
                     train_acc=train_acc, val_acc=val_acc,
                     lr=current_lr, duration_s=epoch_duration,
                 )
-                logger.info(
-                    "Epoch %3d/%d | train_loss=%.4f | val_loss=%.4f | "
-                    "val_acc=%.3f | lr=%.2e | %.1fs",
-                    epoch + 1, cfg.epochs, train_loss, val_loss,
-                    val_acc, current_lr, epoch_duration,
+                # Progress line to the Dagster run view (live), with ETA.
+                self._log(
+                    "Epoch %d/%d | train_loss=%.4f | val_loss=%.4f | val_acc=%.3f "
+                    "| lr=%.2e | %.1fs/epoch | ETA %s"
+                    % (epoch + 1, cfg.epochs, train_loss, val_loss, val_acc,
+                       current_lr, epoch_duration, _fmt_eta(remaining))
                 )
+                # Live metric curve in the Dagster asset UI.
+                self._emit_observation(epoch + 1, {
+                    "train_loss": train_loss, "val_loss": val_loss,
+                    "train_acc": train_acc, "val_acc": val_acc, "lr": current_lr,
+                    "epoch_duration_s": epoch_duration,
+                    "progress_pct": 100.0 * (epoch + 1) / max(cfg.epochs, 1),
+                })
                 history.append({
                     "epoch": epoch + 1, "train_loss": train_loss,
                     "val_loss": val_loss, "train_acc": train_acc,
@@ -436,17 +509,27 @@ class ModelTrainer:
                 })
 
                 monitor = val_loss if cfg.early_stop_metric == "val_loss" else -val_acc
-                if monitor < best_metric:
+                improved = monitor < best_metric
+                if improved:
                     best_metric      = monitor
                     best_epoch       = epoch + 1
                     patience_counter = 0
                     self._save_checkpoint(model, epoch, val_loss, val_acc, run_id)
                 else:
                     patience_counter += 1
-                    if patience_counter >= cfg.early_stop_patience:
-                        logger.info("Early stopping at epoch %d (best=%d)",
-                                    epoch + 1, best_epoch)
-                        break
+
+                # Always persist a resumable checkpoint (model + optimizer +
+                # scheduler + epoch/best state) so an interrupted run continues
+                # instead of restarting from epoch 0.
+                self._save_resumable(
+                    model, optimizer, scheduler, epoch,
+                    best_metric, best_epoch, patience_counter, run_id,
+                )
+
+                if not improved and patience_counter >= cfg.early_stop_patience:
+                    self._log("Early stopping at epoch %d (best=%d)"
+                              % (epoch + 1, best_epoch))
+                    break
 
             best_ckpt = os.path.join(cfg.checkpoint_dir, "best_model.pt")
             # Guarantee a checkpoint exists. With tiny/degenerate validation sets
@@ -484,6 +567,9 @@ class ModelTrainer:
         total_samples = 0
         optimizer.zero_grad()
 
+        n_batches = len(self.train_loader)
+        epoch_t0  = time.time()
+
         for step, (inputs, targets) in enumerate(self.train_loader):
             inputs  = inputs.to(self.device, non_blocking=True)
             targets = targets.to(self.device, non_blocking=True)
@@ -520,6 +606,15 @@ class ModelTrainer:
                     epoch=epoch + 1, step=step + 1,
                     loss=total_loss / (step + 1), lr=current_lr,
                 )
+                # Live per-batch progress in the Dagster run view, with an ETA for
+                # the current epoch so a long epoch is visibly advancing.
+                elapsed   = time.time() - epoch_t0
+                batch_eta = elapsed / max(step + 1, 1) * (n_batches - (step + 1))
+                self._log(
+                    "  epoch %d/%d  batch %d/%d  loss=%.4f  lr=%.2e  (epoch ETA %s)"
+                    % (epoch + 1, self.cfg.epochs, step + 1, n_batches,
+                       total_loss / (step + 1), current_lr, _fmt_eta(batch_eta))
+                )
 
         return (
             total_loss / max(len(self.train_loader), 1),
@@ -553,6 +648,124 @@ class ModelTrainer:
                 cm[t][p] += 1
 
         return avg_loss, accuracy, cm
+
+    # ------------------------------------------------------------------ #
+    # Resume / progress helpers                                            #
+    # ------------------------------------------------------------------ #
+
+    def _cfg_fingerprint(self) -> str:
+        """Identity of the training setup, for deciding resume compatibility.
+
+        Keyed on architecture + feature + shape + epoch budget — NOT on things
+        that are safe to change mid-run. If any of these differ, a stale
+        last_checkpoint.pt is ignored and training restarts fresh.
+        """
+        cfg = self.cfg
+        return "|".join(str(x) for x in (
+            cfg.task_name, cfg.model_name, cfg.feature_type,
+            tuple(cfg.input_shape or []), cfg.epochs,
+        ))
+
+    def _maybe_resume(self, model, optimizer, scheduler):
+        """Restore from last_checkpoint.pt if present & compatible.
+
+        Returns either 0 (fresh start) or a tuple
+        (start_epoch, best_metric, best_epoch, patience_counter).
+        """
+        import torch
+
+        if not getattr(self.cfg, "resume", True):
+            return 0
+        path = os.path.join(self.cfg.checkpoint_dir, "last_checkpoint.pt")
+        if not os.path.exists(path):
+            return 0
+        try:
+            state = torch.load(path, map_location=self.device, weights_only=False)
+        except Exception as exc:
+            logger.warning("Could not read resume checkpoint %s (%s) — starting fresh.",
+                           path, exc)
+            return 0
+
+        if state.get("cfg_fingerprint") != self._cfg_fingerprint():
+            self._log(
+                "Found last_checkpoint.pt but its config fingerprint differs "
+                "(architecture/feature/epochs changed) — starting fresh."
+            )
+            return 0
+
+        try:
+            model.load_state_dict(state["model_state_dict"])
+            optimizer.load_state_dict(state["optimizer_state_dict"])
+            if scheduler is not None and state.get("scheduler_state_dict"):
+                scheduler.load_state_dict(state["scheduler_state_dict"])
+        except Exception as exc:
+            self._log(
+                "Resume checkpoint is incompatible with the current model "
+                f"({str(exc)[:160]}) — starting fresh. Delete {path} to silence this."
+            )
+            return 0
+
+        start_epoch      = int(state.get("epoch", -1)) + 1
+        best_metric      = float(state.get("best_metric", float("inf")))
+        best_epoch       = int(state.get("best_epoch", 0))
+        patience_counter = int(state.get("patience_counter", 0))
+        self._log(
+            f"Resuming from epoch {start_epoch}/{self.cfg.epochs} "
+            f"(best epoch {best_epoch}, best_metric={best_metric:.4f})."
+        )
+        return (start_epoch, best_metric, best_epoch, patience_counter)
+
+    def _save_resumable(self, model, optimizer, scheduler, epoch: int,
+                        best_metric: float, best_epoch: int,
+                        patience_counter: int, run_id: str) -> None:
+        """Persist full training state so an interrupted run can continue.
+
+        Separate from best_model.pt (which is weights-only for portable
+        inference); this file holds optimizer/scheduler/epoch state and is only
+        used to resume.
+        """
+        import torch
+
+        os.makedirs(self.cfg.checkpoint_dir, exist_ok=True)
+        path = os.path.join(self.cfg.checkpoint_dir, "last_checkpoint.pt")
+        tmp  = path + ".tmp"
+        try:
+            torch.save({
+                "model_state_dict":     model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "scheduler_state_dict": scheduler.state_dict() if scheduler else None,
+                "epoch":                epoch,          # last COMPLETED epoch (0-based)
+                "best_metric":          best_metric,
+                "best_epoch":           best_epoch,
+                "patience_counter":     patience_counter,
+                "cfg_fingerprint":      self._cfg_fingerprint(),
+                "task_name":            self.cfg.task_name,
+                "model_architecture":   self.cfg.model_name,
+                "run_id":               run_id,
+                "saved_at":             time.time(),
+            }, tmp)
+            os.replace(tmp, path)   # atomic: a crash mid-save can't corrupt the resume file
+        except Exception as exc:
+            logger.warning("Failed to write resumable checkpoint: %s", exc)
+
+    def _emit_observation(self, epoch: int, metrics: dict) -> None:
+        """Emit a Dagster AssetObservation so the UI shows a live metric curve.
+
+        No-op when running standalone (no Dagster context) or if anything about
+        the Dagster API differs — progress is still visible via the log lines.
+        """
+        ctx = self._ctx
+        if ctx is None:
+            return
+        try:
+            from dagster import AssetObservation, MetadataValue
+            asset_key = getattr(ctx, "asset_key", None)
+            md = {k: MetadataValue.float(float(v)) for k, v in metrics.items()}
+            md["epoch"] = MetadataValue.int(int(epoch))
+            if asset_key is not None:
+                ctx.log_event(AssetObservation(asset_key=asset_key, metadata=md))
+        except Exception as exc:
+            logger.debug("AssetObservation emit skipped: %s", exc)
 
     def _save_checkpoint(self, model, epoch: int, val_loss: float,
                          val_acc: float, run_id: str) -> None:

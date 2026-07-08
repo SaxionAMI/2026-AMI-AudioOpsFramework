@@ -176,7 +176,15 @@ def build_audio_assets(task_name: str, resource_key: str, capabilities):
             overlap=float(getattr(config, "segment_overlap", 0.25)),
         )
         feature_out = os.path.abspath(os.path.join(base_out, "features"))
-        stats = processor.process_directory(input_dir, feature_out)
+        force_recompute = bool(getattr(config, "force_recompute", False))
+        # Progress + skip-if-exists are handled inside process_directory; stream its
+        # heartbeat/progress into the Dagster run log so a slow step is visibly
+        # making progress rather than looking hung.
+        stats = processor.process_directory(
+            input_dir, feature_out,
+            force_recompute=force_recompute,
+            progress=context.log.info,
+        )
 
         elapsed = time.time() - t0
         metrics.write_pipeline_event(
@@ -205,6 +213,9 @@ def build_audio_assets(task_name: str, resource_key: str, capabilities):
             metadata={
                 "feature_dir": MetadataValue.path(feature_out),
                 "total_segments": MetadataValue.int(stats.get("total_segments", 0)),
+                "total_files": MetadataValue.int(stats.get("total_files", 0)),
+                "skipped_files": MetadataValue.int(stats.get("skipped_files", 0)),
+                "force_recompute": MetadataValue.bool(force_recompute),
             },
         )
 
@@ -331,6 +342,7 @@ def build_audio_assets(task_name: str, resource_key: str, capabilities):
             trainer = ModelTrainer(
                 task, task_config, checkpoint_dir=checkpoint_dir,
                 influxdb_metrics=metrics, dagster_run_id=context.run_id,
+                context=context,
             )
             checkpoint_path = trainer.train(
                 model=model, train_loader=train_loader, val_loader=val_loader
@@ -377,7 +389,16 @@ def build_audio_assets(task_name: str, resource_key: str, capabilities):
         input_shape = getattr(task_config, "input_shape", None)
         model = task.build_model(input_shape=input_shape)
         _ckpt = torch.load(checkpoint_path, weights_only=True)
-        model.load_state_dict(_ckpt["model_state_dict"] if isinstance(_ckpt, dict) and "model_state_dict" in _ckpt else _ckpt)
+        _state = _ckpt["model_state_dict"] if isinstance(_ckpt, dict) and "model_state_dict" in _ckpt else _ckpt
+        try:
+            model.load_state_dict(_state)
+        except RuntimeError as exc:
+            raise ValueError(
+                f"Incompatible checkpoint for this model architecture at "
+                f"{checkpoint_path} — it looks like a checkpoint from a different "
+                f"model (e.g. ResNet weights into an AST model). Remove it (rm "
+                f"{checkpoint_path}) and retrain. ({str(exc)[:200]})"
+            ) from None
 
         is_seq = getattr(task, "TASK_TYPE", "classification") == "transcription"
         label_to_idx = None

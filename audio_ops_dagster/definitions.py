@@ -52,6 +52,24 @@ class AudioTaskResource(ConfigurableResource):
     model_architecture: str = "cnn"
     split_strategy: str = "random"
     input_shape: Optional[List[int]] = None
+
+    # ── Feature / segmentation knobs ─────────────────────────────────────────
+    # Declared here too, otherwise the `valid_fields` filter below strips them
+    # from config.yaml before the resource is built, and segmented_features'
+    # getattr(config, "segment_duration", 1.0) silently falls back to 1.0.
+    sample_rate: int = 16000
+    segment_duration: float = 1.0
+    segment_overlap: float = 0.25
+    force_recompute: bool = False
+
+    # ── Training knobs (flow through to_task_config() into the trainer) ──────
+    weight_decay: float = 0.0
+    warmup_epochs: int = 0
+    grad_clip: Optional[float] = None
+    early_stop_patience: int = 10
+    early_stop_metric: str = "val_loss"
+    class_weights: Optional[List[float]] = None
+
     use_remote_storage: bool = False
     storage_bucket_prefix: str = ""
     model_name: Optional[str] = None

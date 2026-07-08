@@ -118,3 +118,56 @@ def _ast(y: np.ndarray, sr: int) -> np.ndarray:
     fe = _get_ast_fe()
     out = fe(y, sampling_rate=sr, return_tensors="np")
     return out["input_values"][0].astype(np.float32)
+
+
+# ── AST features, librosa-only (no torchaudio) ───────────────────────────────
+# transformers' ASTFeatureExtractor pulls in torchaudio, which is what surfaced
+# the `libcudart.so.13` CUDA-lib mismatch. This path produces the same SHAPE and
+# normalization convention using librosa alone, so a consumer can select
+# `feature_type: ast_librosa` and never import torchaudio.
+#
+# Trade-off: librosa's mel filterbank is not bit-identical to AST's Kaldi fbank
+# (window, dithering, and mean-subtraction differ), so features are a close
+# APPROXIMATION rather than an exact match to the pretraining input. Use `ast`
+# (transformers) when maximum parity with the pretrained checkpoint matters and
+# torchaudio is available; use `ast_librosa` to shed the torchaudio/CUDA
+# dependency at a small fidelity cost. Whichever you pick, use the SAME one for
+# training AND serving so train/serve features match.
+_AST_TARGET_FRAMES = 1024
+_AST_NUM_MEL_BINS = 128
+# AudioSet mean/std used by ASTFeatureExtractor's default normalization.
+_AST_MEAN = -4.2677393
+_AST_STD = 4.5689974
+
+
+@register_feature("ast_librosa")
+def _ast_librosa(y: np.ndarray, sr: int) -> np.ndarray:
+    """AST-compatible mel features via librosa, shape (1024, 128) float32.
+
+    No torchaudio import. Approximates ASTFeatureExtractor's (1024,128)
+    AudioSet-normalized input.
+    """
+    import librosa
+
+    y = np.asarray(y, dtype=np.float32)
+    # 25 ms window / 10 ms hop at the model's 16 kHz assumption (Kaldi defaults).
+    n_fft = 400
+    hop_length = 160
+    mel = librosa.feature.melspectrogram(
+        y=y, sr=sr, n_fft=n_fft, hop_length=hop_length,
+        n_mels=_AST_NUM_MEL_BINS, htk=True, power=2.0,
+    )
+    # Log compression (natural log of power), matching fbank's log-energy scale.
+    log_mel = np.log(np.maximum(mel, 1e-10)).astype(np.float32)  # (128, frames)
+
+    # AST expects (time, mel) = (1024, 128). Transpose then pad/truncate time.
+    feat = log_mel.T  # (frames, 128)
+    frames = feat.shape[0]
+    if frames < _AST_TARGET_FRAMES:
+        feat = np.pad(feat, ((0, _AST_TARGET_FRAMES - frames), (0, 0)))
+    elif frames > _AST_TARGET_FRAMES:
+        feat = feat[:_AST_TARGET_FRAMES]
+
+    # Normalize with AST's convention: (x - mean) / (std * 2).
+    feat = (feat - _AST_MEAN) / (_AST_STD * 2.0)
+    return feat.astype(np.float32)

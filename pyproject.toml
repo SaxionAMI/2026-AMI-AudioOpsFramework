@@ -22,57 +22,79 @@ Repository = "https://github.com/your-org/audio-ops-framework"
 Documentation = "https://audio-ops.readthedocs.io"
 
 # ════════════════════════════════════════════════════════════════════════════
-# All Dependencies
+# Dependencies
 # ════════════════════════════════════════════════════════════════════════════
+#
+# Design: the framework CORE declares only the task contract + config + storage
+# + audio-IO deps that EVERY consumer needs. The heavy ML/training stack and the
+# serving stack live behind OPTIONAL extras, so:
+#
+#     pip install "audio-ops-framework[train]"   # grass: full Dagster pipeline
+#     pip install "audio-ops-framework[serve]"   # serving-only: no dagster/mlflow
+#     pip install "audio-ops-framework"          # contract/tools only, no torch
+#
+# This is the root fix for the torch/CUDA fights: a serving-only consumer no
+# longer drags in torch/dagster/mlflow, and the torch pin below matches what we
+# actually run (2.4 cu121) so installing the framework can't silently DOWNGRADE
+# a consumer's carefully-pinned torch to 2.2 (the cause of the libcudart.so.13
+# mismatch). The grass Dockerfile's UV_OVERRIDE for torch is now belt-and-braces
+# rather than load-bearing; the grpcio cap there is still needed (see Dagster
+# issue #33978) until upstream ships a fix.
 
 [tool.poetry.dependencies]
 python = ">=3.10,<3.15"
 
-# Shared Utilities & Configuration
+# ── Core (ALWAYS installed) ──────────────────────────────────────────────────
+# Task contract, config schema, registry, storage, audio IO, metrics client.
 pyyaml = "^6"
 python-dotenv = "^1"
 pydantic = "^2"
 pydantic-settings = "^2"
 python-multipart = "^0.0.6"
-
-# Logging
 structlog = "^23"
 python-json-logger = "^2"
-
-# Orchestration & Workflow
-dagster = "^1.6"
-dagster-webserver = "^1.6"
-
-# ML & Audio
-torch = "^2.2.0"
-torchaudio = "^2.2.0"
-torchvision = "^0.17.0"
-librosa = "^0.10"
-faster-whisper = "^1.0"
-onnxruntime = ">=1.16,<1.18"
 numpy = "^1.24"
-scipy = "^1.11"
-pandas = "^2"
-scikit-learn = "^1.2"
-
-# NLP & Transformers
-transformers = "^4.30"
-datasets = "^2.14"
-jiwer = "^3.0"
-
-# Experiment Tracking & MLOps
-mlflow = "^2.12"
-
-# Storage & Database
+scipy = "^1.11"           # librosa runtime dep
+librosa = "^0.10"
+soundfile = "^0.14.0"
+pandas = "^2"             # AudioDataset split IO (pipeline side)
 minio = "^7.2"
+boto3 = "^1.34"          # S3StorageBackend uses boto3; minio kept for parity
 influxdb-client = "^1.18"
-sqlalchemy = "^2"
-boto3 = "^1.34"
+
+# ── Optional: training stack ([train]) ───────────────────────────────────────
+# Bumped torch pin (>=2.4,<2.7) so the framework can't downgrade a consumer's
+# pinned CUDA build. torchaudio is only needed by the transformers `ast` feature
+# path; use feature_type `ast_librosa` to avoid it entirely.
+torch = { version = ">=2.4,<2.7", optional = true }
+torchvision = { version = ">=0.19,<0.22", optional = true }
+torchaudio = { version = ">=2.4,<2.7", optional = true }
+dagster = { version = "^1.6", optional = true }
+dagster-webserver = { version = "^1.6", optional = true }
+mlflow = { version = "^2.12", optional = true }
+scikit-learn = { version = "^1.2", optional = true }
+transformers = { version = "^4.30", optional = true }
+
+# ── Optional: serving stack ([serve]) ────────────────────────────────────────
+fastapi = { version = "^0.110", optional = true }
+uvicorn = { version = "^0.29", optional = true }
+
+# NOTE (removed from the framework — task-specific, belong with the consuming
+# repo/task, not the shared core): faster-whisper & onnxruntime (STT/nonverbal),
+# datasets & jiwer (STT training), sqlalchemy (unused), torchvision weight
+# downloads. None are imported by framework code. An STT/nonverbal consumer
+# should declare these in its OWN pyproject.
+
+[tool.poetry.extras]
+# Full offline training pipeline (Dagster assets, trainer, MLflow, AST features).
+train = ["torch", "torchvision", "torchaudio", "dagster", "dagster-webserver",
+         "mlflow", "scikit-learn", "transformers"]
+# Runtime inference service only — no Dagster/MLflow/sklearn.
+serve = ["torch", "torchvision", "transformers", "fastapi", "uvicorn"]
 
 # ════════════════════════════════════════════════════════════════════════════
 # Development Dependencies
 # ════════════════════════════════════════════════════════════════════════════
-soundfile = "^0.14.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^7.4"
