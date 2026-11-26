@@ -1,0 +1,24 @@
+# GPU overlay for the INFERENCE service:
+#
+#   docker compose -f docker-compose.inference.yml -f docker-compose.inference.gpu.yml up -d --build
+#   (combine with the core files + docker-compose.gpu.yml to run everything on GPU)
+#
+# Requires the NVIDIA Container Toolkit on the host.
+
+services:
+  inference:
+    image: audio-ops-inference:local-gpu
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.inference
+      args:
+        TORCH_INDEX_URL: ${TORCH_CUDA_INDEX_URL:-https://download.pytorch.org/whl/cu124}
+    environment:
+      DEVICE: cuda
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

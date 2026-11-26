@@ -1,19 +1,22 @@
-# Thin project repo — depends on the audio-ops-framework package.
-# Put your tasks under tasks/<name>/ and point AUDIO_OPS_TASKS_DIR at them.
-[tool.poetry]
+# A project repo that depends on the Audio Ops Framework.
+# Your tasks live in tasks/<name>/ and are found automatically.
+# ./scripts/setup.sh reads the dependencies below and installs them.
+[project]
 name = "my-audio-project"
 version = "0.1.0"
 description = "A project built on the Audio Ops Framework"
-authors = ["You <you@example.com>"]
-package-mode = false
+requires-python = ">=3.10,<3.15"
+dependencies = [
+    # The framework, pinned to a release tag. Pick the extras this project
+    # needs: train (Dagster pipeline), serve (API), s3, metrics, ast.
+    "audio-ops-framework[train,serve] @ git+https://github.com/SaxionAMI/2026-AMI-AudioOpsFramework.git@v1.2.0",
+    # Once the framework is published on PyPI you can use instead:
+    #   "audio-ops-framework[train,serve]>=1.2,<2",
+]
 
-[tool.poetry.dependencies]
-python = ">=3.10,<3.15"
-# Co-development (recommended while the framework is changing):
-audio-ops-framework = { path = "../audio-ops-framework", develop = true }
-# Pin to a release instead once stable:
-# audio-ops-framework = { git = "https://github.com/your-org/audio-ops-framework", tag = "v0.3.0" }
+# Working on the framework at the same time? Clone it next to this repo; the
+# setup script then uses it if GitHub can't be reached, or explicitly with:
+#   ./scripts/setup.sh --framework ../2026-AMI-AudioOpsFramework
 
-[build-system]
-requires = ["poetry-core"]
-build-backend = "poetry.core.masonry.api"
+[tool.uv]
+package = false

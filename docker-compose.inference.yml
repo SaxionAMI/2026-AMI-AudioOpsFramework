@@ -1,59 +1,53 @@
-# Audio Ops Framework — STREAMING INFERENCE service (production unit).
+# Audio Ops Framework — STREAMING INFERENCE service (+ a demo media server).
 #
-# Deploy this independently of training. It's a long-running, latency-bound
-# service that holds models in memory and consumes file/RTSP/WebSocket audio,
-# emitting results over SSE. It reads trained checkpoints from local storage
-# (shared volume) or object storage (STORAGE_BACKEND=minio).
+# Long-running, latency-bound; holds models in memory and consumes file / RTSP /
+# WebSocket audio, emitting results over SSE. Reads trained checkpoints from the
+# shared ./storage volume or from object storage (STORAGE_BACKEND=minio).
 #
-#   docker compose -f docker-compose.inference.yml up -d              # standalone
+#   docker compose -f docker-compose.inference.yml up -d                 # standalone
 #   docker compose -f docker-compose.yml -f docker-compose.inference.yml up -d
-#   add -f docker-compose.gpu.yml                                      # GPU
+#   add -f docker-compose.inference.gpu.yml                               # GPU
 #
-# Scale the API horizontally behind a load balancer as needed; it is stateless
-# apart from the in-memory models and per-connection stream buffers.
-
-version: "3.8"
+# Scale horizontally behind a load balancer; state is per-connection only.
+# Demo audio: `audio-ops demo-data --stream-demo mediamtx/test_audio/demo.wav`.
 
 services:
   inference:
     build:
       context: .
-      dockerfile: ./audio_ops_inference/Dockerfile.inference
+      dockerfile: docker/Dockerfile.inference
+    image: audio-ops-inference:local
     container_name: audio-ops-inference
     ports:
       - "${INFERENCE_PORT:-8000}:8000"
+    env_file:
+      - path: .env
+        required: false
     environment:
-      # storage / models
-      - STORAGE_BACKEND=${STORAGE_BACKEND:-local}
-      - TASKS_DIR=/app/tasks
-      - AUDIO_OPS_TASKS_DIR=${AUDIO_OPS_TASKS_DIR:-}
-      - MODELS_DIR=/app/storage/models
-      - MODEL_CACHE_DIR=/app/models
-      # features
-      - ENABLE_INFLUXDB=${ENABLE_INFLUXDB:-false}
-      - ENABLE_LLM=${ENABLE_LLM:-false}
-      - ENABLE_FUSION=${ENABLE_FUSION:-false}
-      # runtime
-      - DEVICE=${DEVICE:-cpu}
-      - COMPUTE_TYPE=${COMPUTE_TYPE:-int8}
-      - INFERENCE_PORT=8000
-      - INFERENCE_WORKERS=${INFERENCE_WORKERS:-1}
-      # streaming knobs (advanced; see env.example)
-      - CHUNK_MS=${CHUNK_MS:-1000}
-      - AUTO_RTSP_STREAMS=${AUTO_RTSP_STREAMS:-}
+      STORAGE_BACKEND: ${STORAGE_BACKEND:-local}
+      AUDIO_OPS_TASKS_DIR: ${AUDIO_OPS_TASKS_DIR:-}
+      MODELS_DIR: /app/models
+      MODEL_CACHE_DIR: /app/models
+      ENABLE_INFLUXDB: ${ENABLE_INFLUXDB:-false}
+      ENABLE_LLM: ${ENABLE_LLM:-false}
+      ENABLE_FUSION: ${ENABLE_FUSION:-false}
+      DEVICE: ${DEVICE:-auto}
+      CHUNK_MS: ${CHUNK_MS:-1000}
+      API_KEY: ${API_KEY:-}
+      CORS_ALLOW_ORIGINS: ${CORS_ALLOW_ORIGINS:-*}
+      STREAM_AUTODISCOVER: ${STREAM_AUTODISCOVER:-false}
+      MEDIAMTX_API_URL: http://mediamtx:9997
+      RTSP_BASE_URL: rtsp://mediamtx:8554
+      AUTO_RTSP_STREAMS: ${AUTO_RTSP_STREAMS:-}
+      DEMO_AUDIO_PATH: /test_audio/demo.wav
     volumes:
-      - ./storage:/app/storage
-      - ./audio_ops_dagster/tasks:/app/tasks
-      - ./audio_ops_dagster:/app/audio_ops_dagster
-      - ./models:/app/models
+      - ./storage:/app/storage:ro                      # checkpoints written by training
+      - model-cache:/app/models                        # HF/TF-Hub downloads (persisted)
+      - ./audio_ops_dagster:/app/audio_ops_dagster     # live source (dev)
+      - ./audio_ops_inference:/app/audio_ops_inference
+      - ./mediamtx/test_audio:/test_audio:ro
     networks: [audio-ops]
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 40s
 
   mediamtx:
     build: ./mediamtx
@@ -63,16 +57,18 @@ services:
     restart: unless-stopped
     ports:
       - "8554:8554"     # RTSP
-      - "1935:1935"     # RTMP
       - "8888:8888"     # HLS
-      - "8889:8889"     # WebRTC
+      - "8889:8889"     # WebRTC (WHIP/WHEP)
       - "9997:9997"     # API
       - "8189:8189/udp" # WebRTC ICE
     environment:
-      - MTX_WEBRTCICEUDPSERVERPORT=8189
+      MTX_WEBRTCICEUDPSERVERPORT: 8189
     volumes:
-      - ./mediamtx/mediamtx.yml:/mediamtx.yml
-      - ./mediamtx/test_audio:/test_audio
+      - ./mediamtx/mediamtx.yml:/mediamtx.yml:ro
+      - ./mediamtx/test_audio:/test_audio:ro
+
+volumes:
+  model-cache:
 
 networks:
   audio-ops:

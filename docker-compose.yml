@@ -1,67 +1,57 @@
 # Audio Ops Framework — CORE orchestration (training & batch inference).
 #
-# This file runs Dagster only. The streaming inference service is a separate
-# deployable — see docker-compose.inference.yml — because it has a different
-# operational profile (long-running, latency-bound, scaled independently).
+# Runs Dagster only. The streaming inference service is a separate deployable
+# (docker-compose.inference.yml) because it has a different operational
+# profile: long-running, latency-bound, scaled independently.
 #
-#   docker compose up -d                      # core (Dagster) only
-#   docker compose -f docker-compose.yml \
-#                  -f docker-compose.inference.yml up -d   # core + inference
-#   docker compose -f docker-compose.inference.yml up -d   # inference only
-#   add -f docker-compose.gpu.yml             # GPU on either
+#   docker compose up -d                                        # core only
+#   docker compose -f docker-compose.yml -f docker-compose.inference.yml up -d   # both
+#   docker compose -f docker-compose.inference.yml up -d        # inference only
+#   GPU: add -f docker-compose.gpu.yml (core) / -f docker-compose.inference.gpu.yml
 #
-# Optional services (MinIO, InfluxDB, MLflow server, Grafana, LLM) are omitted;
-# the code runs without them (see MIGRATION.md / env.example).
+# Optional services (MinIO, InfluxDB, MLflow server, Grafana, an LLM) are not
+# bundled; the code runs without them. See docs/guide/integrations.md.
 
-version: "3.8"
+x-dagster-env: &dagster-env
+  DAGSTER_HOME: /app/dagster_home
+  STORAGE_BACKEND: ${STORAGE_BACKEND:-local}
+  ENABLE_INFLUXDB: ${ENABLE_INFLUXDB:-false}
+  MLFLOW_TRACKING_URI: ${MLFLOW_TRACKING_URI:-sqlite:////app/mlruns/mlflow.db}
+  ENABLE_LLM: ${ENABLE_LLM:-false}
+  AUDIO_OPS_TASKS_DIR: ${AUDIO_OPS_TASKS_DIR:-}
+  DEVICE: ${DEVICE:-auto}
+
+x-dagster-common: &dagster-common
+  build:
+    context: .
+    dockerfile: docker/Dockerfile.dagster
+  image: audio-ops-dagster:local
+  env_file:
+    - path: .env
+      required: false
+  environment: *dagster-env
+  volumes:
+    - .:/app                       # live source (dev); remove for an immutable deploy
+    - ./dagster_home:/app/dagster_home
+    - ./storage:/app/storage
+    - ./audio_input:/app/audio_input
+    - ./mlruns:/app/mlruns
+  networks: [audio-ops]
+  restart: unless-stopped
 
 services:
   dagster:
-    build:
-      context: .
-      dockerfile: ./audio_ops_dagster/Dockerfile.dagster
+    <<: *dagster-common
     container_name: audio-ops-dagster
     ports:
       - "${DAGSTER_PORT:-3000}:3000"
-    environment:
-      - DAGSTER_HOME=${DAGSTER_HOME:-/app/dagster_home}
-      - STORAGE_BACKEND=${STORAGE_BACKEND:-local}
-      - ENABLE_INFLUXDB=${ENABLE_INFLUXDB:-false}
-      - MLFLOW_TRACKING_URI=${MLFLOW_TRACKING_URI:-file:/app/mlruns}
-      - ENABLE_LLM=${ENABLE_LLM:-false}
-      - AUDIO_OPS_TASKS_DIR=${AUDIO_OPS_TASKS_DIR:-}
-    entrypoint:
-      ["dagster-webserver", "-h", "0.0.0.0", "-p", "3000", "-w", "/app/workspace.yaml"]
-    volumes:
-      - ./dagster_home:${DAGSTER_HOME:-/app/dagster_home}
-      - .:/app
-      - ./storage:/app/storage
-      - ./audio_input:/app/audio_input
-      - ./mlruns:/app/mlruns
-    networks: [audio-ops]
-    restart: unless-stopped
+    command: ["dagster-webserver", "-h", "0.0.0.0", "-p", "3000", "-w", "/app/workspace.yaml"]
 
   dagster-daemon:
-    build:
-      context: .
-      dockerfile: ./audio_ops_dagster/Dockerfile.dagster
+    <<: *dagster-common
     container_name: audio-ops-daemon
-    entrypoint: ["dagster-daemon", "run", "-w", "/app/workspace.yaml"]
-    environment:
-      - DAGSTER_HOME=${DAGSTER_HOME:-/app/dagster_home}
-      - STORAGE_BACKEND=${STORAGE_BACKEND:-local}
-      - ENABLE_INFLUXDB=${ENABLE_INFLUXDB:-false}
-      - MLFLOW_TRACKING_URI=${MLFLOW_TRACKING_URI:-file:/app/mlruns}
-      - AUDIO_OPS_TASKS_DIR=${AUDIO_OPS_TASKS_DIR:-}
-    volumes:
-      - ./dagster_home:${DAGSTER_HOME:-/app/dagster_home}
-      - .:/app
-      - ./storage:/app/storage
-      - ./audio_input:/app/audio_input
-      - ./mlruns:/app/mlruns
+    command: ["dagster-daemon", "run", "-w", "/app/workspace.yaml"]
     depends_on: [dagster]
-    networks: [audio-ops]
-    restart: unless-stopped
 
 networks:
   audio-ops:

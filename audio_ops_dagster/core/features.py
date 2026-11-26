@@ -63,6 +63,8 @@ def has_feature(name: str) -> bool:
 
 # ── Built-in extractors ──────────────────────────────────────────────────────
 
+@register_feature("mel_spectrogram")   # legacy alias
+@register_feature("melspectrogram")    # legacy alias
 @register_feature("spectrogram")
 def _spectrogram(y: np.ndarray, sr: int) -> np.ndarray:
     """Normalized log-mel spectrogram in [0, 1], shape (128, T). (Default.)"""
@@ -71,6 +73,7 @@ def _spectrogram(y: np.ndarray, sr: int) -> np.ndarray:
     return np.clip((librosa.power_to_db(s, ref=np.max) + 40) / 40, 0, 1).astype(np.float32)
 
 
+@register_feature("log_mel")           # legacy alias
 @register_feature("logmel")
 @register_feature("mel")
 def _logmel(y: np.ndarray, sr: int) -> np.ndarray:

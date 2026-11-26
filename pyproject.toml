@@ -1,156 +1,164 @@
-[tool.poetry]
+[project]
 name = "audio-ops-framework"
-version = "1.0.0"
-description = "Audio operations framework - shared core and full ML/training stack"
-authors = ["Your Name <you@example.com>"]
-license = "MIT"
+version = "1.2.0"
+description = "Audio machine learning pipelines and streaming inference from small task definitions, built on Dagster and FastAPI."
 readme = "README.md"
-packages = [
-    { include = "audio_ops_dagster" },
-    { include = "audio_ops_inference" },
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+authors = [{ name = "Saxion University of Applied Sciences, research group Ambient Intelligence" }]
+maintainers = [{ email = "e.m.vanwolfswinkel@saxion.nl" }]
+requires-python = ">=3.10,<3.15"
+keywords = ["audio", "machine-learning", "mlops", "dagster", "pytorch", "streaming", "inference", "speech"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Multimedia :: Sound/Audio :: Analysis",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Typing :: Typed",
 ]
 
-[tool.poetry.scripts]
+# ── Core (always installed) ─────────────────────────────────────────────────
+# The task contract, config schema, registry, feature registry and audio IO.
+# Heavy stacks (torch, dagster, fastapi) live behind extras, so a serving-only
+# consumer never pulls Dagster/MLflow and a training-only one never pulls
+# FastAPI. torch has a floor but no ceiling, so installing the framework can't
+# downgrade a consumer's carefully pinned CUDA build.
+dependencies = [
+    "numpy>=1.24",
+    "pyyaml>=6.0",
+    "pydantic>=2.5",
+    "librosa>=0.10.1",
+    "soundfile>=0.12",
+]
+
+[project.optional-dependencies]
+# Full offline pipeline: Dagster assets, trainer, MLflow tracking.
+train = [
+    "torch>=2.4",
+    "dagster>=1.8",
+    "dagster-webserver>=1.8",
+    "mlflow>=2.12",
+    "scikit-learn>=1.3",
+    "pandas>=2.0",
+]
+# Streaming inference service only — no Dagster/MLflow.
+serve = [
+    "torch>=2.4",
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "python-multipart>=0.0.9",
+]
+# feature_type: ast (transformers' ASTFeatureExtractor). ast_librosa needs nothing extra.
+ast = ["transformers>=4.30", "torchaudio>=2.4"]
+# Object storage (MinIO / S3 / R2 / B2).
+s3 = ["boto3>=1.34"]
+# InfluxDB metrics sink.
+metrics = ["influxdb-client>=1.38"]
+all = ["audio-ops-framework[train,serve,ast,s3,metrics]"]
+dev = [
+    "audio-ops-framework[train,serve,s3,metrics]",
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "httpx>=0.27",
+    "ruff>=0.6",
+    "mypy>=1.10",
+    "pre-commit>=3.7",
+    "build>=1.2",
+    "twine>=5.0",
+]
+docs = ["zensical>=0.0.20"]
+
+[project.scripts]
+audio-ops = "audio_ops_dagster.cli:main"
 audio-ops-serve = "audio_ops_inference.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/SaxionAMI/2026-AMI-AudioOpsFramework"
+Documentation = "https://saxionami.github.io/2026-AMI-AudioOpsFramework/"
+Repository = "https://github.com/SaxionAMI/2026-AMI-AudioOpsFramework"
+Issues = "https://github.com/SaxionAMI/2026-AMI-AudioOpsFramework/issues"
+Changelog = "https://github.com/SaxionAMI/2026-AMI-AudioOpsFramework/blob/main/CHANGELOG.md"
+
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["audio_ops", "audio_ops_dagster", "audio_ops_inference"]
+exclude = ["**/Dockerfile*"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "audio_ops",
+    "audio_ops_dagster",
+    "audio_ops_inference",
+    "tests",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE",
+    "NOTICE",
+    "env.example",
+]
 
 [tool.dagster]
 module_name = "audio_ops_dagster.definitions"
-
-[tool.poetry.urls]
-Homepage = "https://github.com/your-org/audio-ops-framework"
-Repository = "https://github.com/your-org/audio-ops-framework"
-Documentation = "https://audio-ops.readthedocs.io"
-
-# ════════════════════════════════════════════════════════════════════════════
-# Dependencies
-# ════════════════════════════════════════════════════════════════════════════
-#
-# Design: the framework CORE declares only the task contract + config + storage
-# + audio-IO deps that EVERY consumer needs. The heavy ML/training stack and the
-# serving stack live behind OPTIONAL extras, so:
-#
-#     pip install "audio-ops-framework[train]"   # grass: full Dagster pipeline
-#     pip install "audio-ops-framework[serve]"   # serving-only: no dagster/mlflow
-#     pip install "audio-ops-framework"          # contract/tools only, no torch
-#
-# This is the root fix for the torch/CUDA fights: a serving-only consumer no
-# longer drags in torch/dagster/mlflow, and the torch pin below matches what we
-# actually run (2.4 cu121) so installing the framework can't silently DOWNGRADE
-# a consumer's carefully-pinned torch to 2.2 (the cause of the libcudart.so.13
-# mismatch). The grass Dockerfile's UV_OVERRIDE for torch is now belt-and-braces
-# rather than load-bearing; the grpcio cap there is still needed (see Dagster
-# issue #33978) until upstream ships a fix.
-
-[tool.poetry.dependencies]
-python = ">=3.10,<3.15"
-
-# ── Core (ALWAYS installed) ──────────────────────────────────────────────────
-# Task contract, config schema, registry, storage, audio IO, metrics client.
-pyyaml = "^6"
-python-dotenv = "^1"
-pydantic = "^2"
-pydantic-settings = "^2"
-python-multipart = "^0.0.6"
-structlog = "^23"
-python-json-logger = "^2"
-numpy = "^1.24"
-scipy = "^1.11"           # librosa runtime dep
-librosa = "^0.10"
-soundfile = "^0.14.0"
-pandas = "^2"             # AudioDataset split IO (pipeline side)
-minio = "^7.2"
-boto3 = "^1.34"          # S3StorageBackend uses boto3; minio kept for parity
-influxdb-client = "^1.18"
-
-# ── Optional: training stack ([train]) ───────────────────────────────────────
-# Bumped torch pin (>=2.4,<2.7) so the framework can't downgrade a consumer's
-# pinned CUDA build. torchaudio is only needed by the transformers `ast` feature
-# path; use feature_type `ast_librosa` to avoid it entirely.
-torch = { version = ">=2.4,<2.7", optional = true }
-torchvision = { version = ">=0.19,<0.22", optional = true }
-torchaudio = { version = ">=2.4,<2.7", optional = true }
-dagster = { version = "^1.6", optional = true }
-dagster-webserver = { version = "^1.6", optional = true }
-mlflow = { version = "^2.12", optional = true }
-scikit-learn = { version = "^1.2", optional = true }
-transformers = { version = "^4.30", optional = true }
-
-# ── Optional: serving stack ([serve]) ────────────────────────────────────────
-fastapi = { version = "^0.110", optional = true }
-uvicorn = { version = "^0.29", optional = true }
-
-# NOTE (removed from the framework — task-specific, belong with the consuming
-# repo/task, not the shared core): faster-whisper & onnxruntime (STT/nonverbal),
-# datasets & jiwer (STT training), sqlalchemy (unused), torchvision weight
-# downloads. None are imported by framework code. An STT/nonverbal consumer
-# should declare these in its OWN pyproject.
-
-[tool.poetry.extras]
-# Full offline training pipeline (Dagster assets, trainer, MLflow, AST features).
-train = ["torch", "torchvision", "torchaudio", "dagster", "dagster-webserver",
-         "mlflow", "scikit-learn", "transformers"]
-# Runtime inference service only — no Dagster/MLflow/sklearn.
-serve = ["torch", "torchvision", "transformers", "fastapi", "uvicorn"]
-
-# ════════════════════════════════════════════════════════════════════════════
-# Development Dependencies
-# ════════════════════════════════════════════════════════════════════════════
-
-[tool.poetry.group.dev.dependencies]
-pytest = "^7.4"
-pytest-cov = "^4.1"
-pytest-asyncio = "^0.21"
-black = "^23"
-flake8 = "^6.1"
-mypy = "^1.7"
-isort = "^5.13"
-jupyter = "^1"
-ipython = "^8.17"
 
 # ════════════════════════════════════════════════════════════════════════════
 # Tooling
 # ════════════════════════════════════════════════════════════════════════════
 
-[tool.black]
+[tool.ruff]
 line-length = 100
-target-version = ["py310", "py311"]
+target-version = "py310"
+extend-exclude = ["project-template"]
 
-[tool.isort]
-profile = "black"
-line-length = 100
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = [
+    "E501",   # long lines: readability over a hard limit (keep it ~100)
+    "E701",   # aligned one-line ifs in metric builders
+    "E203",   # whitespace before ':' (aligned assignments)
+    "E221",   # multiple spaces before operator (aligned assignments)
+    "E241",   # multiple spaces after ',' (aligned literals)
+    "B008",   # FastAPI Depends()/File() in defaults
+    "B905",   # zip(strict=) — py3.10 floor
+    "UP007",  # keep Optional[...] for readability
+    "UP045",
+    "UP006",
+    "UP035",
+    "UP031",  # printf-style log lines are fine
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["B"]
 
 [tool.mypy]
 python_version = "3.10"
-warn_return_any = true
+warn_return_any = false
 check_untyped_defs = true
-
-[[tool.mypy.overrides]]
-module = [
-    "librosa.*",
-    "minio.*",
-    "influxdb_client.*",
-    "dagster.*",
-    "torch.*",
-    "torchaudio.*",
-    "torchvision.*",
-    "transformers.*",
-    "sklearn.*",
-    "faster_whisper.*",
-    "mlflow.*",
-    "datasets.*",
-]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 minversion = "7.0"
 testpaths = ["tests"]
+addopts = "-ra"
 markers = [
-    "unit: Unit tests",
-    "integration: Integration tests",
-    "slow: Slow tests",
-    "gpu: GPU tests",
+    "integration: runs a real Dagster pipeline / API end to end (a few seconds each)",
+    "slow: slow tests",
+    "gpu: needs a CUDA device",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::UserWarning:dagster.*",
 ]
 
-[build-system]
-requires = ["poetry-core>=1.0.0"]
-build-backend = "poetry.core.masonry.api"
+[tool.coverage.run]
+source = ["audio_ops", "audio_ops_dagster", "audio_ops_inference"]
+omit = ["*/tasks/*"]

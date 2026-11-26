@@ -35,6 +35,36 @@ class ArtifactType:
     OUTPUTS  = "outputs"
 
 
+def storage_settings_from_env() -> dict:
+    """Connection settings shared by the Dagster resource and the inference API.
+
+    Reads ``MINIO_ENDPOINT`` (full URL) or ``MINIO_HOST``/``MINIO_PORT``,
+    ``MINIO_ACCESS_KEY``/``MINIO_SECRET_KEY`` (or ``MINIO_ROOT_USER``/
+    ``MINIO_ROOT_PASSWORD``), ``MINIO_BUCKET_NAME``, ``MINIO_REGION`` and
+    ``MINIO_USE_SSL``. Credentials left unset fall through to boto3's default
+    chain (``AWS_*`` env vars, instance roles, …) — no credentials are baked in.
+    """
+    use_ssl = os.getenv("MINIO_USE_SSL", "false").lower() == "true"
+    raw_endpoint = os.getenv("MINIO_ENDPOINT", "").strip()
+    if raw_endpoint.startswith(("http://", "https://")):
+        endpoint_url: Optional[str] = raw_endpoint
+    elif raw_endpoint:
+        endpoint_url = f"{'https' if use_ssl else 'http'}://{raw_endpoint}"
+    elif os.getenv("MINIO_HOST"):
+        endpoint_url = (f"{'https' if use_ssl else 'http'}://{os.environ['MINIO_HOST']}:"
+                        f"{os.getenv('MINIO_PORT', '9000')}")
+    else:
+        endpoint_url = None  # real AWS S3
+    return {
+        "endpoint_url": endpoint_url,
+        "access_key": os.getenv("MINIO_ACCESS_KEY") or os.getenv("MINIO_ROOT_USER") or None,
+        "secret_key": os.getenv("MINIO_SECRET_KEY") or os.getenv("MINIO_ROOT_PASSWORD") or None,
+        "bucket": os.getenv("MINIO_BUCKET_NAME", "audioops-bucket"),
+        "region": os.getenv("MINIO_REGION", "us-east-1"),
+        "use_ssl": use_ssl,
+    }
+
+
 class S3StorageBackend:
     """
     Thin, generic S3 wrapper used throughout the pipeline.
@@ -58,8 +88,8 @@ class S3StorageBackend:
     def __init__(
         self,
         endpoint_url: Optional[str],
-        access_key: str,
-        secret_key: str,
+        access_key: Optional[str],
+        secret_key: Optional[str],
         bucket: str,
         region: str = "us-east-1",
         use_ssl: bool = False,
@@ -86,8 +116,8 @@ class S3StorageBackend:
                 from botocore.config import Config
             except ImportError as exc:
                 raise ImportError(
-                    "boto3 is required for S3/MinIO storage. "
-                    "Add it to pyproject.toml: boto3 = \"^1.34\""
+                    "boto3 is required for S3/MinIO storage: "
+                    "pip install 'audio-ops-framework[s3]'"
                 ) from exc
 
             self._client = boto3.client(
@@ -385,60 +415,17 @@ class S3StorageBackend:
     # ─── Factory class methods ────────────────────────────────────────────────
 
     @classmethod
-    def from_env(cls, bucket: Optional[str] = None) -> "S3StorageBackend":
+    def from_env(cls, bucket: Optional[str] = None) -> S3StorageBackend:
         """
-        Build an S3StorageBackend from standard environment variables.
-
-        Reads:
-          MINIO_ENDPOINT      — e.g. "http://minio:9000"
-          MINIO_ACCESS_KEY    — root user / access key
-          MINIO_SECRET_KEY    — root password / secret key
-          MINIO_BUCKET_NAME   — default bucket
-          MINIO_REGION        — default "us-east-1"
-          MINIO_USE_SSL       — "true" / "false"
-          ENABLE_MINIO        — "false" disables storage without errors
+        Build an S3StorageBackend from environment variables (see
+        :func:`storage_settings_from_env`). Enabled unless ``ENABLE_MINIO=false``
+        — callers decide *whether* to use object storage via ``STORAGE_BACKEND``.
         """
-        enabled = os.getenv("ENABLE_MINIO", "true").lower() != "false"
-
-        endpoint_host = os.getenv("MINIO_HOST", "minio")
-        endpoint_port = os.getenv("MINIO_PORT", "9000")
-        use_ssl = os.getenv("MINIO_USE_SSL", "false").lower() == "true"
-        scheme = "https" if use_ssl else "http"
-        raw_endpoint = os.getenv("MINIO_ENDPOINT", "")
-        if raw_endpoint and raw_endpoint.startswith(("http://", "https://")):
-            endpoint_url = raw_endpoint
-        else:
-            endpoint_url = f"{scheme}://{endpoint_host}:{endpoint_port}"
-
-        return cls(
-            endpoint_url=endpoint_url,
-            access_key=os.getenv("MINIO_ACCESS_KEY") or os.getenv("MINIO_ROOT_USER", "minioadmin"),
-            secret_key=os.getenv("MINIO_SECRET_KEY") or os.getenv("MINIO_ROOT_PASSWORD", "minioadmin"),
-            bucket=bucket or os.getenv("MINIO_BUCKET_NAME", "audioops-bucket"),
-            region=os.getenv("MINIO_REGION", "us-east-1"),
-            use_ssl=use_ssl,
-            enabled=enabled,
-        )
-
-    @classmethod
-    def from_minio_config(cls, minio_config) -> "S3StorageBackend":
-        """
-        Build from a MinIOConfig dataclass instance (from config_loader.py).
-
-        Usage:
-            from config_loader import get_config
-            backend = S3StorageBackend.from_minio_config(get_config().minio)
-        """
-        scheme = "https" if minio_config.use_ssl else "http"
-        endpoint_url = f"{scheme}://{minio_config.host}:{minio_config.port}"
-        return cls(
-            endpoint_url=endpoint_url,
-            access_key=minio_config.root_user,
-            secret_key=minio_config.root_password,
-            bucket=minio_config.bucket_name,
-            region=minio_config.region,
-            use_ssl=minio_config.use_ssl,
-        )
+        settings = storage_settings_from_env()
+        if bucket:
+            settings["bucket"] = bucket
+        settings["enabled"] = os.getenv("ENABLE_MINIO", "true").lower() != "false"
+        return cls(**settings)
 
     def __repr__(self) -> str:
         return (

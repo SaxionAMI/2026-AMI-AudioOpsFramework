@@ -1,5 +1,6 @@
-# workspace.yaml
+# Dagster workspace used by the Docker images (`dagster-webserver -w workspace.yaml`).
+# Locally, `audio-ops dev` (or `dagster dev -m audio_ops_dagster.definitions`) is simpler.
 load_from:
-  - python_file:
-      relative_path: "audio_ops_dagster/definitions.py"
-      working_directory: "/app"
+  - python_module:
+      module_name: audio_ops_dagster.definitions
+      working_directory: "."

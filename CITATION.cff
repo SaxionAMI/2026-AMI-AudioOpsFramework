@@ -1,0 +1,17 @@
+cff-contact:
+  - name: "Saxion University of Applied Sciences, research group Ambient Intelligence"
+    email: "e.m.vanwolfswinkel@saxion.nl"
+version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "Audio Ops Framework"
+abstract: >-
+  A Python framework for audio machine learning. A task described in a
+  config file gets feature extraction, training, evaluation, batch scoring
+  and a streaming inference API, with the offline pipeline run by Dagster.
+authors:
+  - name: "Saxion University of Applied Sciences, research group Ambient Intelligence"
+version: 1.2.0
+date-released: 2026-11-26
+license: Apache-2.0
+repository-code: "https://github.com/SaxionAMI/2026-AMI-AudioOpsFramework"
+keywords: [audio, machine learning, MLOps, Dagster, PyTorch, streaming inference]

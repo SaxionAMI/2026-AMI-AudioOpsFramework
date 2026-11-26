@@ -12,8 +12,8 @@ The fuser collects them onto one timeline and produces:
                                  interleaved inline at their real time position
                                  and sentiment shifts annotated, e.g.
 
-        [00:12] (kalm) Dokter, ik heb sinds gisteren pijn in mijn borst [kreunt]
-        [00:19] (angstig) en het wordt erger als ik adem [hoest] [piepende ademhaling]
+        [00:12] (calm) Doctor, I've had chest pain since yesterday [groans]
+        [00:19] (anxious) and it gets worse when I breathe [coughs] [breathing]
 
   2. build_llm_payload()      -> structured dict (segments with text +
                                  concurrent nonverbal tags + sentiment context)
@@ -21,8 +21,14 @@ The fuser collects them onto one timeline and produces:
 
   3. build_llm_messages()     -> ready-to-send OpenAI/Ollama chat messages.
 
-It is pure-Python (no torch / no tf) so it can live in core/ and be imported
-by both the inference service and any Dagster asset.
+It is pure-Python (no torch / no tf) so it can be imported by both the
+inference service and any Dagster asset.
+
+Language: inline tags and the default LLM prompts come in English (``en``,
+default) and Dutch (``nl``). Pick with ``TranscriptFuser(language=...)`` or the
+``FUSION_LANGUAGE`` env var; add your own by extending ``LANGUAGE_PACKS``. The
+default prompts frame the transcript as a call to be summarised — pass your
+own ``system_prompt``/``instruction`` for other domains.
 
 Design notes
 ------------
@@ -37,11 +43,9 @@ Design notes
 
 from __future__ import annotations
 
-import json
 import math
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
-
 
 # --------------------------------------------------------------------------- #
 # Timeline primitives                                                          #
@@ -86,6 +90,55 @@ def _fmt_clock(t: float) -> str:
 # The fuser                                                                    #
 # --------------------------------------------------------------------------- #
 
+LANGUAGE_PACKS: Dict[str, Dict[str, Any]] = {
+    "en": {
+        "nonverbal_display": {
+            "cough": "coughs", "laugh": "laughs", "cry": "cries", "pain": "groans",
+            "breathing": "breathing", "silence": "silence", "music": "music",
+            "alarm": "alarm", "applause": "applause",
+        },
+        "system": (
+            "You are an assistant that summarises audio. You receive a fused "
+            "transcript: the spoken words, non-verbal sounds in [brackets] at their "
+            "position in time, and the emotional tone (sentiment) per segment. "
+            "Summarise concisely what is happening, mention notable non-verbal "
+            "signals and the emotional state. Do not invent anything."
+        ),
+        "instruction": (
+            "Give a short summary (max 5 sentences) and an urgency estimate "
+            "(low / medium / high) with a brief justification."
+        ),
+        "headings": ("Transcript (with non-verbal events and sentiment)", "Summary"),
+        "none": "none", "unknown": "unknown",
+        "nv_line": "Non-verbal events", "sent_line": "Sentiment distribution",
+        "dur_line": "Duration so far",
+    },
+    "nl": {
+        "nonverbal_display": {
+            "cough": "hoest", "laugh": "lacht", "cry": "huilt", "pain": "kreunt",
+            "breathing": "ademhaling", "silence": "stilte", "music": "muziek",
+            "alarm": "alarm", "applause": "applaus",
+        },
+        "system": (
+            "Je bent een medische triage-assistent. Je krijgt een gefuseerde "
+            "transcriptie van een telefonisch consult: de gesproken tekst, "
+            "non-verbale geluiden tussen [haken] op hun tijdspositie, en de "
+            "emotionele toon (sentiment) per segment. Vat bondig samen wat er "
+            "speelt, noem opvallende non-verbale signalen (hoesten, kreunen, "
+            "huilen, ademhaling) en de emotionele toestand. Verzin niets."
+        ),
+        "instruction": (
+            "Geef een korte klinische samenvatting (max 5 zinnen) en een "
+            "urgentie-inschatting (laag / midden / hoog) met onderbouwing."
+        ),
+        "headings": ("Transcript (met non-verbale events en sentiment)", "Samenvatting"),
+        "none": "geen", "unknown": "onbekend",
+        "nv_line": "Non-verbale events", "sent_line": "Sentiment-verdeling",
+        "dur_line": "Duur tot nu",
+    },
+}
+
+
 class TranscriptFuser:
     """
     Rolling, media-clock-aligned fusion of the three audio tasks.
@@ -104,20 +157,8 @@ class TranscriptFuser:
         one inline tag (avoids "[hoest] [hoest] [hoest]").
     """
 
-    # Dutch-friendly display names for inline tags. Unknown labels fall back
-    # to the raw label, so adding a curated group needs no change here.
-    NONVERBAL_DISPLAY = {
-        "cough":     "hoest",
-        "laugh":     "lacht",
-        "cry":       "huilt",
-        "pain":      "kreunt",
-        "breathing": "ademhaling",
-        "silence":   "stilte",
-        "music":     "muziek",
-        "alarm":     "alarm",
-        "applause":  "applaus",
-        # 'speech' is intentionally omitted — speech is already the transcript.
-    }
+    # Kept for backwards compatibility; the active pack's tags are used.
+    NONVERBAL_DISPLAY = None  # type: ignore[assignment]
     NONVERBAL_IGNORE_INLINE = {"speech", "silence", "unknown"}
 
     def __init__(
@@ -126,7 +167,13 @@ class TranscriptFuser:
         segment_gap_seconds: float = 1.6,
         nonverbal_min_conf: float = 0.12,
         nonverbal_merge_seconds: float = 1.2,
+        language: Optional[str] = None,
     ):
+        import os
+
+        lang = (language or os.environ.get("FUSION_LANGUAGE", "en")).lower()
+        self.language = lang if lang in LANGUAGE_PACKS else "en"
+        self._pack = LANGUAGE_PACKS[self.language]
         self.horizon = horizon_seconds
         self.segment_gap = segment_gap_seconds
         self.nv_min_conf = nonverbal_min_conf
@@ -265,7 +312,8 @@ class TranscriptFuser:
         return out
 
     def _nv_display(self, label: str) -> str:
-        return self.NONVERBAL_DISPLAY.get(label, label)
+        table = self.NONVERBAL_DISPLAY or self._pack["nonverbal_display"]
+        return table.get(label, label)
 
     # ----- structured segments (the heart of fusion) ---------------------- #
 
@@ -414,7 +462,9 @@ class TranscriptFuser:
             cut = self._latest_t - window_seconds
             segs = [s for s in segs if s["t_end"] >= cut]
 
-        in_window = lambda end: window_seconds is None or end >= (self._latest_t - window_seconds)
+        def in_window(end):
+            return window_seconds is None or end >= (self._latest_t - window_seconds)
+
         sentiment_track = [
             {"t_start": round(s.t_start, 2), "t_end": round(s.t_end, 2),
              "label": s.label, "confidence": round(s.confidence, 3)}
@@ -469,36 +519,28 @@ class TranscriptFuser:
         Pair with audio_ops_dagster.core.llm_client.LLMClient.chat().
         """
         payload = self.build_llm_payload(window_seconds=window_seconds)
-        system = system_prompt or (
-            "Je bent een medische triage-assistent. Je krijgt een gefuseerde "
-            "transcriptie van een telefonisch consult: de gesproken tekst, "
-            "non-verbale geluiden tussen [haken] op hun tijdspositie, en de "
-            "emotionele toon (sentiment) per segment. Vat bondig samen wat er "
-            "speelt, noem opvallende non-verbale signalen (hoesten, kreunen, "
-            "huilen, ademhaling) en de emotionele toestand. Verzin niets."
-        )
-        instr = instruction or (
-            "Geef een korte klinische samenvatting (max 5 zinnen) en een "
-            "urgentie-inschatting (laag / midden / hoog) met onderbouwing."
-        )
+        pack = self._pack
+        system = system_prompt or pack["system"]
+        instr = instruction or pack["instruction"]
         # Compact summary instead of dumping all segment JSON. The fused
         # transcript already carries the inline [non-verbal] tags and sentiment,
-        # so a full JSON dump just bloats the prompt (thousands of tokens, far too
-        # slow on CPU). We add only short aggregate counts.
+        # so a full JSON dump just bloats the prompt.
         from collections import Counter
         nv_counts = Counter(n["label"] for n in payload["nonverbal_track"])
         nv_summary = ", ".join(f"{self._nv_display(k)} x{v}"
-                               for k, v in nv_counts.most_common()) or "geen"
+                               for k, v in nv_counts.most_common()) or pack["none"]
         sent_counts = Counter(s["label"] for s in payload["sentiment_track"])
-        sent_summary = ", ".join(f"{k} ({v})" for k, v in sent_counts.most_common()) or "onbekend"
+        sent_summary = (", ".join(f"{k} ({v})" for k, v in sent_counts.most_common())
+                        or pack["unknown"])
+        h_transcript, h_summary = pack["headings"]
         user = (
             f"{instr}\n\n"
-            f"=== Transcript (met non-verbale events en sentiment) ===\n"
+            f"=== {h_transcript} ===\n"
             f"{payload['fused_transcript']}\n\n"
-            f"=== Samenvatting ===\n"
-            f"Non-verbale events: {nv_summary}.\n"
-            f"Sentiment-verdeling: {sent_summary}.\n"
-            f"Duur tot nu: {payload['media_time']:.0f}s."
+            f"=== {h_summary} ===\n"
+            f"{pack['nv_line']}: {nv_summary}.\n"
+            f"{pack['sent_line']}: {sent_summary}.\n"
+            f"{pack['dur_line']}: {payload['media_time']:.0f}s."
         )
         return [
             {"role": "system", "content": system},

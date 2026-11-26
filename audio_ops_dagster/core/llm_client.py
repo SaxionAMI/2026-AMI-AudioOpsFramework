@@ -39,7 +39,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -59,7 +59,7 @@ class LLMConfig:
     enabled: bool = False  # opt-in — don't break pipelines that don't need LLM
 
     @classmethod
-    def from_env(cls) -> "LLMConfig":
+    def from_env(cls) -> LLMConfig:
         return cls(
             provider=os.getenv("LLM_PROVIDER", "ollama"),
             base_url=os.getenv("LLM_BASE_URL", "http://ollama:11434"),
@@ -85,7 +85,7 @@ class LLMClient:
         self._session = None
 
     @classmethod
-    def from_env(cls) -> "LLMClient":
+    def from_env(cls) -> LLMClient:
         return cls(LLMConfig.from_env())
 
     def _api_url(self) -> str:
@@ -136,8 +136,8 @@ class LLMClient:
         if not self.config.enabled:
             return ""
 
-        import urllib.request
         import urllib.error
+        import urllib.request
 
         url = self._api_url()
         payload = self._build_payload(messages)

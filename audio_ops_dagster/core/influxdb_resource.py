@@ -36,11 +36,10 @@ from __future__ import annotations
 
 import logging
 import os
-import time
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional
 
-from dagster import ConfigurableResource, EnvVar
+from dagster import ConfigurableResource
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +53,7 @@ class InfluxDBMetricsResource(ConfigurableResource):
     """
 
     url: str = "http://influxdb:8086"
-    token: str = "unset"
+    token: str = ""
     org: str = "audioops"
     bucket: str = "audio_metrics"
     # Off by default: the template ships without InfluxDB, so every write()
@@ -66,11 +65,10 @@ class InfluxDBMetricsResource(ConfigurableResource):
     # ── Lazy client ──────────────────────────────────────────────────────────
 
     def _get_write_api(self):
-        cache_key = id(self)
+        cache_key = (self.url, self.token, self.org, self.batch_size, self.flush_interval_ms)
         if cache_key not in _write_api_cache:
             try:
                 from influxdb_client import InfluxDBClient, WriteOptions
-                from influxdb_client.client.write_api import SYNCHRONOUS
 
                 client = InfluxDBClient(
                     url=self.url,
@@ -86,7 +84,8 @@ class InfluxDBMetricsResource(ConfigurableResource):
                 _write_api_cache[cache_key] = (client, write_api)
             except ImportError:
                 logger.warning(
-                    "influxdb-client not installed — metrics will be no-ops"
+                    "influxdb-client not installed — metrics will be no-ops "
+                    "(pip install 'audio-ops-framework[metrics]')"
                 )
                 _write_api_cache[cache_key] = (None, None)
             except Exception as exc:
@@ -94,6 +93,15 @@ class InfluxDBMetricsResource(ConfigurableResource):
                 _write_api_cache[cache_key] = (None, None)
 
         return _write_api_cache[cache_key][1]
+
+    def teardown_after_execution(self, context) -> None:  # noqa: ARG002
+        """Flush batched points before the run process exits.
+
+        The batching writer sends from a background thread; without this the
+        last batch of a short run (``audio-ops run``, a Dagster run worker) is
+        dropped at interpreter shutdown.
+        """
+        flush_all()
 
     # ── Generic write ────────────────────────────────────────────────────────
 
@@ -243,7 +251,7 @@ class InfluxDBMetricsResource(ConfigurableResource):
     # ── Factory ──────────────────────────────────────────────────────────────
 
     @classmethod
-    def from_env(cls) -> "InfluxDBMetricsResource":
+    def from_env(cls) -> InfluxDBMetricsResource:
         enabled = os.getenv("ENABLE_INFLUXDB", "false").lower() == "true"
         host = os.getenv("INFLUXDB_HOST", "influxdb")
         port = os.getenv("INFLUXDB_PORT", "8086")
@@ -251,11 +259,24 @@ class InfluxDBMetricsResource(ConfigurableResource):
 
         return cls(
             url=os.getenv("INFLUXDB_URL", f"{scheme}://{host}:{port}"),
-            token=os.getenv("INFLUXDB_TOKEN", os.getenv("INFLUXDB_ADMIN_TOKEN", "audioopstoken")),
+            token=os.getenv("INFLUXDB_TOKEN") or os.getenv("INFLUXDB_ADMIN_TOKEN") or "",
             org=os.getenv("INFLUXDB_ORG", "audioops"),
             bucket=os.getenv("INFLUXDB_BUCKET", "audio_metrics"),
             enabled=enabled,
         )
 
 
-_write_api_cache: dict[int, tuple] = {}
+_write_api_cache: dict[tuple, tuple] = {}
+
+
+def flush_all() -> None:
+    """Flush and close every cached InfluxDB writer. Safe to call repeatedly."""
+    for key, (client, write_api) in list(_write_api_cache.items()):
+        try:
+            if write_api is not None:
+                write_api.close()        # flushes pending batches
+            if client is not None:
+                client.close()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("InfluxDB flush failed: %s", exc)
+        _write_api_cache.pop(key, None)

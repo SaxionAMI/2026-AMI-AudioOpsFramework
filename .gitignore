@@ -1,186 +1,66 @@
-# Byte-compiled / optimized / DLL files
+# Python
 __pycache__/
 *.py[cod]
-*$py.class
-
-# C extensions
 *.so
-
-# Distribution / packaging
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-pip-wheel-metadata/
-share/python-wheels/
 *.egg-info/
-.installed.cfg
-*.egg
-MANIFEST
-
-# PyInstaller
-*.manifest
-*.spec
-
-# Installer logs
-pip-log.txt
-pip-delete-this-directory.txt
-
-# Unit test / coverage reports
-htmlcov/
-.tox/
-.nox/
-.coverage
-.coverage.*
-.cache
-nosetests.xml
-coverage.xml
-*.cover
-*.py,cover
-.hypothesis/
-.pytest_cache/
-
-# Translations
-*.mo
-*.pot
-
-# Django stuff:
-*.log
-local_settings.py
-db.sqlite3
-db.sqlite3-journal
-
-# Flask stuff:
-instance/
-.webassets-cache
-
-# Scrapy stuff:
-.scrapy
-
-# Sphinx documentation
-docs/_build/
-
-# PyBuilder
-target/
-
-# Jupyter Notebook
-.ipynb_checkpoints
-
-# IPython
-profile_default/
-ipython_config.py
-
-# pyenv
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
 .python-version
 
-# pipenv
-Pipfile.lock
-
-# PEP 582
-__pypackages__/
-
-# Celery stuff
-celerybeat-schedule
-celerybeat.pid
-
-# SageMath parsed files
-*.sage.py
-
-# Environments
-.env
-.venv
-env/
-venv/
-ENV/
-env.bak/
-venv.bak/
-
-# Spyder project settings
-.spyderproject
-.spyproject
-
-# Rope project settings
-.ropeproject
-
-# mkdocs documentation
-/site
-
-# mypy
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
 .mypy_cache/
-.dmypy.json
-dmypy.json
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.ipynb_checkpoints/
 
-# Pyre type checker
-.pyre/
+# Docs build (Zensical)
+/site/
+.cache/
 
-# IDE
+# Editors / OS
 .vscode/
 .idea/
 *.swp
-*.swo
 *~
 .DS_Store
 
-# Audio Ops Framework specific
-mlruns/
-mlflow/
-data/
-outputs/
-logs/
-*.wav
-*.mp3
-*.flac
-*.ogg
-models/
-checkpoints/
-*.pb
-*.pth
-*.ckpt
-.cache/
-tmp/
-temp/.env
+# Secrets — never commit these
+.env
+.env.*
+!.env.example
 .secrets.env
 secrets/
 *.key
 *.pem
 *.p12
 *.pfx
-dagster_home/
-mlflow/
-minio_storage/
-influxdb_data/
-grafana_data/
-label_studio_data/
-logs/
-.DS_Store
-__pycache__/
-*.pyc
-.venv/
-venv/
-*.egg-info/
-backups/
-.env
-.pytest_cache/
-dist/
-build/
 
-# ── Framework runtime artifacts (added by cleanup) ──
+# Framework runtime artifacts
 storage/
+audio_input/
 dagster_home/
 mlruns/
+mlflow.db
 models/
-audio_input/
+outputs/
+logs/
+tmp/
 *.pt
-.env
-.secrets.env
-__pycache__/
-*.pyc
+*.pth
+*.ckpt
+*.onnx
+
+# Audio (keep the repo free of recordings)
+*.wav
+*.mp3
+*.flac
+*.ogg
+*.m4a

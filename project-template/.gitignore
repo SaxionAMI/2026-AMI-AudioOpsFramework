@@ -2,6 +2,10 @@
 storage/
 mlruns/
 models/
+dagster_home/
 audio_input/*/
 __pycache__/
 *.pyc
+*.wav
+*.pt
+.venv/

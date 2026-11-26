@@ -1,93 +1,34 @@
-# Git
 .git
+.github
 .gitignore
-.gitattributes
-
-# Environment & Secrets
 .env
 .env.*
 .secrets.env
-.secrets.env.*
 secrets/
 
-# Python
 __pycache__
-*.pyc
-*.pyo
-*.pyd
-.Python
-env/
-venv/
+*.py[cod]
+*.egg-info
 .venv
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-pip-log.txt
-pip-delete-this-directory.txt
-.pytest_cache/
+venv
+build
+dist
+.pytest_cache
+.ruff_cache
+.mypy_cache
 .coverage
-htmlcov/
-.mypy_cache/
-.dmypy.json
-dmypy.json
+htmlcov
 
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-.DS_Store
-
-# Documentation
-docs/_build/
-site/
-
-# Temporary files
-*.tmp
-*.temp
-.tmp/
-
-# Data directories (large, can be regenerated)
-dagster_home/
-mlflow/
-minio_storage/
-influxdb_data/
-grafana_data/
-label_studio_data/
-models/
-
-# CI/CD
-.github/
-.gitlab-ci.yml
-.circleci/
-.travis.yml
-
-# Docker
-Dockerfile*
-docker-compose*.yml
-.dockerignore
-# Runtime artifacts & caches (added by cleanup)
-storage/
-dagster_home/
-mlruns/
-models/
-audio_input/
-.pytest_cache/
-.mypy_cache/
-mlruns
-tests/
-dist/
+docs
+site
+tests
+project-template
 *.zip
+
+# runtime data is mounted, never baked in
+storage
+audio_input
+dagster_home
+mlruns
+models
+mediamtx/test_audio

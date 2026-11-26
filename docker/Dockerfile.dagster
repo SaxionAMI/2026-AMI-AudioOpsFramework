@@ -1,0 +1,45 @@
+# Audio Ops Framework — core image (Dagster: training, evaluation, batch inference).
+#
+#   docker build -f docker/Dockerfile.dagster -t audio-ops-dagster .
+#
+# Build args:
+#   TORCH_INDEX_URL  PyTorch wheel index. CPU by default (small image); for CUDA
+#                    use e.g. https://download.pytorch.org/whl/cu124
+#   EXTRAS           package extras to install (default: train,s3,metrics)
+#   EXTRA_PIP        extra pip requirements for your tasks (space-separated)
+ARG PYTHON_VERSION=3.11
+FROM python:${PYTHON_VERSION}-slim
+
+ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cpu
+ARG EXTRAS=train,s3,metrics
+ARG EXTRA_PIP=""
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        curl ffmpeg libsndfile1 libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# torch first, from the chosen index, so the extras below don't pull a CUDA build.
+RUN pip install --index-url "${TORCH_INDEX_URL}" torch
+
+COPY pyproject.toml README.md LICENSE NOTICE ./
+COPY audio_ops_dagster ./audio_ops_dagster
+COPY audio_ops_inference ./audio_ops_inference
+RUN pip install ".[${EXTRAS}]" ${EXTRA_PIP}
+
+COPY workspace.yaml ./
+RUN mkdir -p /app/dagster_home /app/storage /app/audio_input /app/mlruns
+
+# Source mounted at /app (compose dev setup) takes precedence over the install.
+ENV PYTHONPATH=/app \
+    DAGSTER_HOME=/app/dagster_home \
+    MLFLOW_TRACKING_URI=sqlite:////app/mlruns/mlflow.db
+
+EXPOSE 3000
+CMD ["dagster-webserver", "-h", "0.0.0.0", "-p", "3000", "-w", "/app/workspace.yaml"]

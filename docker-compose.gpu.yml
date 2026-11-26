@@ -1,32 +1,28 @@
-# GPU overlay — apply on top of the core and/or inference compose to run on an
-# NVIDIA runtime:
+# GPU overlay for the CORE (Dagster) services:
 #
-#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
-#   docker compose -f docker-compose.inference.yml -f docker-compose.gpu.yml up -d
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build
 #
-# Requires the NVIDIA Container Toolkit on the host.
+# Builds CUDA PyTorch wheels and reserves an NVIDIA GPU for the webserver and
+# the daemon (the daemon launches queued/scheduled runs). Requires the NVIDIA
+# Container Toolkit. For the inference service use docker-compose.inference.gpu.yml.
 
-version: "3.8"
+x-gpu: &gpu
+  image: audio-ops-dagster:local-gpu
+  build:
+    context: .
+    dockerfile: docker/Dockerfile.dagster
+    args:
+      TORCH_INDEX_URL: ${TORCH_CUDA_INDEX_URL:-https://download.pytorch.org/whl/cu124}
+  environment:
+    DEVICE: cuda
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: all
+            capabilities: [gpu]
 
 services:
-  dagster:
-    environment:
-      - DEVICE=cuda
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
-
-  inference:
-    environment:
-      - DEVICE=cuda
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
+  dagster: *gpu
+  dagster-daemon: *gpu

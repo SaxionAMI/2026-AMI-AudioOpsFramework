@@ -1,12 +1,15 @@
 ###############################################################################
-# MediaMTX — Audio Ops
-# Changes vs the original:
-#   * Lower-latency HLS (Low-Latency variant, shorter parts) so the legacy
-#     "Server file" listen path drifts far less from the inference events.
-#   * A documented "microphone" publish path. With the v4 console you usually
-#     push mic audio straight to the inference WebSocket (no MediaMTX needed),
-#     but this path stays useful if you want the browser → WHIP → RTSP route
-#     so OTHER consumers can also subscribe to the mic.
+# MediaMTX — Audio Ops demo media server
+#
+#   rtsp://mediamtx:8554/demo         loops /test_audio/demo.wav on demand
+#   rtsp://mediamtx:8554/microphone   publish target (RTSP, or WHIP from a browser:
+#                                     http://<host>:8889/microphone/whip)
+#
+# Generate the demo file with:
+#   audio-ops demo-data --stream-demo mediamtx/test_audio/demo.wav
+#
+# Add your own on-demand paths below (one ffmpeg publisher per file).
+# Low-latency HLS keeps "listen" playback close to the inference events.
 ###############################################################################
 
 logLevel: info
@@ -21,58 +24,34 @@ metricsAddress: :9998
 rtsp: yes
 rtspAddress: :8554
 
-# ── HLS: switch to Low-Latency to cut the listen-vs-events drift ──────────────
 hls: yes
-hlsVariant: lowLatency          # was: mpegts
+hlsVariant: lowLatency
 hlsAddress: :8888
 hlsAlwaysRemux: yes
-hlsSegmentCount: 7              # LL-HLS wants a few more, shorter segments
+hlsSegmentCount: 7
 hlsSegmentDuration: 1s
-hlsPartDuration: 200ms         # parts drive the low-latency delivery
+hlsPartDuration: 200ms
 hlsAllowOrigins: ['*']
 
-# ── WebRTC: lowest-latency listen option AND the mic publish (WHIP) path ──────
 webrtc: yes
 webrtcAddress: :8889
 webrtcAllowOrigins: ['*']
-# For browser mic publishing via WHIP, point a publisher at:
-#   http://<host>:8889/microphone/whip
-# and subscribers can read rtsp://mediamtx:8554/microphone
 
 paths:
-  all:
-    sourceProtocol: udp
-
   # Publish target for a browser microphone (WHIP/WebRTC) or any RTSP publisher.
   microphone:
     source: publisher
 
-  triage_call:
+  # Loops the generated demo file whenever someone reads the path.
+  demo:
     runOnDemand: >-
-      ffmpeg -re -stream_loop -1 -i /test_audio/long_dutch_consult_doctor.wav
+      ffmpeg -re -stream_loop -1 -i /test_audio/demo.wav
       -c:a aac -b:a 128k -ar 44100 -ac 1 -f rtsp rtsp://localhost:$RTSP_PORT/$MTX_PATH
     runOnDemandCloseAfter: 10s
 
-  stadium_north:
-    runOnDemand: >-
-      ffmpeg -re -stream_loop -1 -i /test_audio/demo_football_sound.wav
-      -c:a aac -b:a 128k -ar 44100 -ac 1 -f rtsp rtsp://localhost:$RTSP_PORT/$MTX_PATH
-    runOnDemandCloseAfter: 10s
-
-  stadium_south:
-    runOnDemand: >-
-      ffmpeg -re -stream_loop -1 -i /test_audio/cheering_stadium_crowd.wav
-      -c:a aac -b:a 128k -ar 44100 -ac 1 -f rtsp rtsp://localhost:$RTSP_PORT/$MTX_PATH
-    runOnDemandCloseAfter: 10s
-
-  stadium_east:
-    runOnDemand: >-
-      ffmpeg -re -stream_loop -1 -i /test_audio/angry_stadium_crowd.wav
-      -c:a aac -b:a 128k -ar 44100 -ac 1 -f rtsp rtsp://localhost:$RTSP_PORT/$MTX_PATH
-    runOnDemandCloseAfter: 10s
-
-  stadium_west:
-    runOnDemand: >-
-      ffmpeg -re -stream_loop -1 -i /test_audio/demo_football_sound2.wav
-      -c:a aac -b:a 128k -ar 44100 -ac 1 -f rtsp rtsp://localhost:$RTSP_PORT/$MTX_PATH
-    runOnDemandCloseAfter: 10s
+  # Example: add more demo streams
+  # my_stream:
+  #   runOnDemand: >-
+  #     ffmpeg -re -stream_loop -1 -i /test_audio/my_file.wav
+  #     -c:a aac -b:a 128k -ar 44100 -ac 1 -f rtsp rtsp://localhost:$RTSP_PORT/$MTX_PATH
+  #   runOnDemandCloseAfter: 10s

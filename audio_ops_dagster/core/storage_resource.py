@@ -24,13 +24,12 @@ from __future__ import annotations
 
 import logging
 import os
-from functools import cached_property
 from pathlib import Path
-from typing import List, Optional
+from typing import List
 
 from dagster import ConfigurableResource
 
-from audio_ops_dagster.core.storage import ArtifactType, S3StorageBackend
+from audio_ops_dagster.core.storage import S3StorageBackend, storage_settings_from_env
 
 logger = logging.getLogger(__name__)
 
@@ -52,9 +51,9 @@ class MinIOStorageResource(ConfigurableResource):
                     STORAGE_BACKEND=minio/s3 or ENABLE_MINIO=true.
     """
 
-    endpoint_url: str = "http://minio:9000"
-    access_key: str = "minioadmin"
-    secret_key: str = "minioadmin"
+    endpoint_url: str = ""          # empty → AWS S3
+    access_key: str = ""            # empty → boto3 default credential chain
+    secret_key: str = ""
     bucket: str = "audioops-bucket"
     region: str = "us-east-1"
     use_ssl: bool = False
@@ -64,12 +63,13 @@ class MinIOStorageResource(ConfigurableResource):
 
     def _get_backend(self) -> S3StorageBackend:
         """Lazily build (and cache) the underlying storage backend."""
-        cache_key = id(self)
+        cache_key = (self.endpoint_url, self.access_key, self.bucket, self.region,
+                     self.use_ssl, self.enabled)
         if cache_key not in _backend_cache:
             _backend_cache[cache_key] = S3StorageBackend(
-                endpoint_url=self.endpoint_url,
-                access_key=self.access_key,
-                secret_key=self.secret_key,
+                endpoint_url=self.endpoint_url or None,
+                access_key=self.access_key or None,
+                secret_key=self.secret_key or None,
                 bucket=self.bucket,
                 region=self.region,
                 use_ssl=self.use_ssl,
@@ -161,44 +161,27 @@ class MinIOStorageResource(ConfigurableResource):
     # ── Factory class method ──────────────────────────────────────────────────
 
     @classmethod
-    def from_env(cls) -> "MinIOStorageResource":
+    def from_env(cls) -> MinIOStorageResource:
         """
-        Build the resource entirely from environment variables.
+        Build the resource from environment variables.
 
-        Local-first: storage is OFF unless STORAGE_BACKEND is minio/s3 or
-        ENABLE_MINIO=true. Variable names match docker-compose.yml / env.example.
+        Local-first: storage is OFF unless ``STORAGE_BACKEND`` is ``minio``/``s3``
+        or ``ENABLE_MINIO=true``. Connection variables are documented in
+        :func:`audio_ops_dagster.core.storage.storage_settings_from_env`.
         """
         backend = os.getenv("STORAGE_BACKEND", "local").lower()
-        enable_minio = os.getenv("ENABLE_MINIO", "").lower()
-        enabled = backend in ("minio", "s3") or enable_minio == "true"
-
-        use_ssl = os.getenv("MINIO_USE_SSL", "false").lower() == "true"
-        scheme = "https" if use_ssl else "http"
-
-        host = os.getenv("MINIO_HOST", "minio")
-        port = os.getenv("MINIO_PORT", "9000")
-        raw_endpoint = os.getenv("MINIO_ENDPOINT", "")
-        if raw_endpoint and raw_endpoint.startswith(("http://", "https://")):
-            endpoint_url = raw_endpoint
-        else:
-            endpoint_url = f"{scheme}://{host}:{port}"
-
+        enabled = backend in ("minio", "s3") or os.getenv("ENABLE_MINIO", "").lower() == "true"
+        settings = storage_settings_from_env()
         return cls(
-            endpoint_url=endpoint_url,
-            access_key=(
-                os.getenv("MINIO_ACCESS_KEY")
-                or os.getenv("MINIO_ROOT_USER", "minioadmin")
-            ),
-            secret_key=(
-                os.getenv("MINIO_SECRET_KEY")
-                or os.getenv("MINIO_ROOT_PASSWORD", "minioadmin")
-            ),
-            bucket=os.getenv("MINIO_BUCKET_NAME", "audioops-bucket"),
-            region=os.getenv("MINIO_REGION", "us-east-1"),
-            use_ssl=use_ssl,
+            endpoint_url=settings["endpoint_url"] or "",
+            access_key=settings["access_key"] or "",
+            secret_key=settings["secret_key"] or "",
+            bucket=settings["bucket"],
+            region=settings["region"],
+            use_ssl=settings["use_ssl"],
             enabled=enabled,
         )
 
 
 # Module-level cache so the backend is only created once per resource instance
-_backend_cache: dict[int, S3StorageBackend] = {}
+_backend_cache: dict[tuple, S3StorageBackend] = {}
